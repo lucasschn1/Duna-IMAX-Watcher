@@ -10,6 +10,7 @@ state.json, que o workflow do GitHub Actions commita de volta no repo.
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -17,6 +18,11 @@ from playwright.sync_api import sync_playwright
 
 URL_SESSOES = "https://www.ingresso.com/cinema/imax-shopping-palladium/sessoes?city=curitiba"
 STATE_FILE = Path(__file__).parent / "state.json"
+
+# Intervalo mínimo entre avisos de "ainda monitorando, nada encontrado".
+# O script pode rodar a cada 30 min (via cron), mas só manda esse aviso
+# quando já tiver passado esse tempo desde o último heartbeat enviado.
+HEARTBEAT_INTERVAL = timedelta(hours=1)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -31,8 +37,19 @@ NO_SESSIONS_MARKERS = [
 
 def load_state() -> dict:
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return {"sessoes_vistas": []}
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        state.setdefault("sessoes_vistas", [])
+        state.setdefault("last_heartbeat", None)
+        return state
+    return {"sessoes_vistas": [], "last_heartbeat": None}
+
+
+def heartbeat_devido(state: dict) -> bool:
+    ultimo = state.get("last_heartbeat")
+    if not ultimo:
+        return True
+    ultimo_dt = datetime.fromisoformat(ultimo)
+    return datetime.now(timezone.utc) - ultimo_dt >= HEARTBEAT_INTERVAL
 
 
 def save_state(state: dict) -> None:
@@ -108,6 +125,7 @@ def main() -> None:
         sys.exit(0)
 
     novas = [s for s in sessoes_atuais if s not in vistas]
+    agora = datetime.now(timezone.utc)
 
     if novas:
         msg = "🎬 Nova sessão de Duna - Parte 3 no IMAX Palladium (Curitiba)!\n\n"
@@ -118,9 +136,20 @@ def main() -> None:
 
         vistas.update(sessoes_atuais)
         state["sessoes_vistas"] = sorted(vistas)
+        state["last_heartbeat"] = agora.isoformat()  # a notificação já conta como aviso
         save_state(state)
     else:
         print("Nenhuma sessão nova encontrada.")
+        if heartbeat_devido(state):
+            send_telegram(
+                "🔎 Duna IMAX Watcher: continuo monitorando o IMAX Palladium "
+                "(Curitiba). Nenhuma sessão de Duna - Parte 3 encontrada até agora."
+            )
+            state["last_heartbeat"] = agora.isoformat()
+            save_state(state)
+            print("Heartbeat enviado.")
+        else:
+            print("Heartbeat ainda não é devido.")
 
 
 if __name__ == "__main__":
