@@ -1,8 +1,10 @@
 # duna-imax-watcher
 
-Monitora a página de sessões do IMAX Shopping Palladium (Curitiba) no
-ingresso.com e avisa no Telegram assim que uma sessão de **Duna - Parte 3**
-aparecer.
+Monitora as sessões de **Duna - Parte 3** no IMAX Shopping Palladium
+(Curitiba) e avisa no Telegram assim que uma sessão nova aparecer. Duas
+fontes são checadas de forma independente, para não depender de uma só:
+a página de sessões do cinema no ingresso.com e a página do próprio IMAX
+Palladium.
 
 100% grátis: roda em GitHub Actions (repositório público = minutos
 ilimitados), sem servidor, sem banco de dados pago.
@@ -28,14 +30,34 @@ ilimitados), sem servidor, sem banco de dados pago.
 
 5. O cron já está configurado para rodar a cada 30 minutos
    (`.github/workflows/check-duna.yml`). Diminua o intervalo (ex: `*/10`)
-   perto da pré-venda antecipada (15-16/12/2026) ou da estreia (17/12/2026).
+   perto da estreia (15/12/2026, segundo a página do filme no ingresso.com).
 
-## Ajuste importante
+## Como a detecção funciona
 
-O seletor CSS em `buscar_sessoes()` (`check_duna_imax.py`) é **provisório**,
-porque a estrutura real do HTML de sessões só pode ser inspecionada quando o
-ingresso.com efetivamente publicar sessões do filme (hoje a página mostra
-"Ainda não temos sessões"). Quando qualquer outro filme estiver em cartaz no
-IMAX Palladium, abra a página de sessões dele no navegador, use "Inspecionar
-elemento" no card de uma sessão e ajuste o seletor em
-`page.query_selector_all(...)` para bater com a classe/atributo real.
+A pré-venda geral do filme começou em 10/09/2026 (habilita a página do
+filme e o "lembre-me"), mas as sessões específicas (dia/hora/sala) só
+aparecem quando o cinema efetivamente abre a venda para cada data. Sessões
+para 15/12 e 16/12/2026 já estão abertas na página do IMAX Palladium — é
+esse tipo de publicação que o watcher detecta.
+
+`buscar_sessoes()` (`check_duna_imax.py`) combina duas fontes:
+
+- **ingresso.com** (`buscar_sessoes_ingresso`): a página de sessões do
+  cinema usa Tailwind puro, sem nenhuma classe ou `data-testid` com
+  "session"/"sessao" — um seletor CSS nunca encontraria nada ali. Em vez
+  disso, lemos o bloco `<script type="application/ld+json">` que a página
+  já embute (dados schema.org `ScreeningEvent`, usados para SEO/Google) e
+  filtramos pelo título do filme (`TITULO_FILME = "duna"`), já que essa
+  página lista todos os filmes em cartaz, não só Duna. Como essa página
+  precisa de JavaScript pra renderizar, usamos Playwright (Chromium
+  headless) aqui.
+- **imaxpalladium.com.br** (`buscar_sessoes_imax_palladium`): página do
+  próprio cinema dedicada a este filme. É HTML estático (renderizado no
+  servidor), então basta `requests` + BeautifulSoup, sem navegador — mais
+  rápido e mais robusto que a fonte acima.
+
+As duas fontes linkam pro mesmo `checkout.ingresso.com/?sessionId=...`, e é
+esse `sessionId` (extraído em `extrair_session_id`) que usamos como chave
+de "sessão já vista" — assim, se as duas fontes acharem a mesma sessão, só
+a primeira notifica, sem duplicar aviso. Se uma fonte falhar (site fora do
+ar, mudança de estrutura), a outra continua funcionando normalmente.

@@ -1,23 +1,41 @@
 """
 Verifica se há novas sessões de "Duna - Parte 3" no IMAX Shopping Palladium
-(Curitiba) via ingresso.com e notifica no Telegram quando encontrar novidade.
+(Curitiba) e notifica no Telegram quando encontrar novidade.
 
-A página é renderizada via JS, então usamos Playwright (Chromium headless)
-em vez de um simples requests.get(). O estado (sessões já vistas) fica em
-state.json, que o workflow do GitHub Actions commita de volta no repo.
+Monitora duas fontes independentes, para não depender de uma só:
+- ingresso.com: página de sessões do cinema (lista todos os filmes em
+  cartaz). É renderizada via JS, então usamos Playwright para essa parte.
+- imaxpalladium.com.br: página do próprio cinema dedicada a este filme.
+  É HTML estático, então usamos só requests + BeautifulSoup, sem navegador.
+
+O estado (sessões já vistas) fica em state.json, que o workflow do GitHub
+Actions commita de volta no repo.
 """
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-URL_SESSOES = "https://www.ingresso.com/cinema/imax-shopping-palladium/sessoes?city=curitiba"
+URL_INGRESSO = "https://www.ingresso.com/cinema/imax-shopping-palladium/sessoes?city=curitiba"
+URL_IMAX_PALLADIUM = "https://imaxpalladium.com.br/filmes/duna-parte-3/"
 STATE_FILE = Path(__file__).parent / "state.json"
+
+# requests.get sem um User-Agent de navegador é bloqueado por alguns sites
+# quando a requisição vem de um IP de datacenter (como os runners do GitHub
+# Actions).
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+}
 
 # Intervalo mínimo entre avisos de "ainda monitorando, nada encontrado".
 # O script pode rodar a cada 30 min (via cron), mas só manda esse aviso
@@ -27,12 +45,9 @@ HEARTBEAT_INTERVAL = timedelta(hours=1)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Textos que indicam "sem sessões ainda" na página do ingresso.com
-NO_SESSIONS_MARKERS = [
-    "ainda não temos sessões",
-    "não há sessões",
-    "nenhuma sessão encontrada",
-]
+# Usado para filtrar, dentre todos os filmes em cartaz no cinema, só as
+# sessões de Duna - Parte 3.
+TITULO_FILME = "duna"
 
 
 def load_state() -> dict:
@@ -75,40 +90,120 @@ def send_telegram(mensagem: str) -> None:
     resp.raise_for_status()
 
 
-def buscar_sessoes() -> list[str]:
-    """Abre a página com Playwright e extrai textos que pareçam sessões.
+def extrair_screening_events(page) -> list[dict]:
+    """Lê os blocos <script type="application/ld+json"> da página e retorna
+    os objetos ScreeningEvent (schema.org) do @graph.
 
-    Retorna uma lista de strings simples (ex: '17/12 20:00 - Dublado 2D IMAX').
-    Ajuste os seletores abaixo se a estrutura do site mudar.
+    O ingresso.com usa Tailwind puro: não há nenhuma classe ou data-testid
+    com "session"/"sessao" no HTML, então um seletor CSS não tem como achar
+    as sessões. O JSON-LD é dado estruturado pensado para SEO/Google, então
+    é uma fonte muito mais estável.
     """
-    sessoes: list[str] = []
+    eventos: list[dict] = []
+    for script in page.query_selector_all("script[type='application/ld+json']"):
+        try:
+            data = json.loads(script.inner_text())
+        except json.JSONDecodeError:
+            continue
+        for item in data.get("@graph", []):
+            if item.get("@type") == "ScreeningEvent":
+                eventos.append(item)
+    return eventos
+
+
+def extrair_session_id(link: str) -> str | None:
+    """Extrai o sessionId do link de checkout.ingresso.com.
+
+    As duas fontes monitoradas linkam para o mesmo checkout.ingresso.com, e
+    esse id é o jeito confiável de saber que duas entradas (uma de cada
+    fonte) são a mesma sessão real — evita notificar duas vezes a mesma
+    sessão só porque cada site descreve ela com um texto diferente.
+    """
+    m = re.search(r"sessionId=(\d+)", link)
+    return m.group(1) if m else None
+
+
+def buscar_sessoes_ingresso() -> list[tuple[str, str]]:
+    """Abre a página de sessões do cinema no ingresso.com (via Playwright) e
+    extrai as sessões de Duna - Parte 3.
+
+    A página lista TODOS os filmes em cartaz, então filtramos pelo título do
+    filme. Retorna pares (chave, texto): chave é o sessionId (usado para
+    detectar novidade e para dedupe entre fontes), texto é a descrição
+    mandada no Telegram.
+    """
+    sessoes: list[tuple[str, str]] = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
-        page.goto(URL_SESSOES, timeout=30000)
+        page.goto(URL_INGRESSO, timeout=30000)
 
         # Espera o conteúdo dinâmico carregar
         page.wait_for_timeout(4000)
 
-        body_text = page.inner_text("body").lower()
-
-        if any(marker in body_text for marker in NO_SESSIONS_MARKERS):
-            browser.close()
-            return []
-
-        # Tenta capturar cards/linhas de sessão de forma genérica.
-        # ATENÇÃO: seletor provisório — inspecione o HTML real do site
-        # quando as sessões forem abertas e ajuste aqui se necessário.
-        candidatos = page.query_selector_all(
-            "[class*='session'], [class*='sessao'], [data-testid*='session']"
-        )
-        for el in candidatos:
-            texto = el.inner_text().strip()
-            if texto and len(texto) < 300:
-                sessoes.append(texto)
+        for evento in extrair_screening_events(page):
+            titulo = (evento.get("workPerformed") or {}).get("name", "")
+            if TITULO_FILME not in titulo.lower():
+                continue
+            inicio = evento.get("startDate", "")
+            formato = evento.get("name", "")
+            link = (evento.get("offers") or {}).get("url", "")
+            texto = f"[Ingresso.com] {inicio} | {formato} | {link}"
+            chave = extrair_session_id(link) or texto
+            sessoes.append((chave, texto))
 
         browser.close()
+
+    return sessoes
+
+
+def buscar_sessoes_imax_palladium() -> list[tuple[str, str]]:
+    """Busca as sessões de Duna - Parte 3 direto na página do IMAX Palladium.
+
+    Ao contrário do ingresso.com, essa página é dedicada só a este filme
+    neste cinema (não precisa filtrar por título) e é HTML estático
+    renderizado no servidor — não precisa de navegador, só requests.
+    """
+    resp = requests.get(URL_IMAX_PALLADIUM, headers=HTTP_HEADERS, timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    sessoes: list[tuple[str, str]] = []
+    for item in soup.select("a.sessao-item"):
+        dia = item.get("data-dia", "")
+        ano = item.get("data-ano", "")
+        hora = item.get("data-hora", "")
+        sala_el = item.select_one(".sessao-item__sala")
+        sala = sala_el.get_text(strip=True) if sala_el else ""
+        tags = [t.get_text(strip=True) for t in item.select(".sessao-item__tag")]
+        link = item.get("href", "")
+        texto = f"[IMAX Palladium] {dia}/{ano} {hora} - {sala} - {'/'.join(tags)} - {link}"
+        chave = extrair_session_id(link) or texto
+        sessoes.append((chave, texto))
+    return sessoes
+
+
+def buscar_sessoes() -> list[tuple[str, str]]:
+    """Junta as sessões das duas fontes monitoradas.
+
+    Cada fonte é isolada em seu próprio try/except: se uma delas falhar (ex:
+    site fora do ar, mudança de estrutura), a outra continua funcionando
+    normalmente em vez de derrubar o run inteiro. Se as duas fontes acharem
+    a mesma sessão (mesmo sessionId), só a primeira ocorrência é mantida.
+    """
+    sessoes: list[tuple[str, str]] = []
+    chaves_vistas: set[str] = set()
+
+    for buscar in (buscar_sessoes_ingresso, buscar_sessoes_imax_palladium):
+        try:
+            for chave, texto in buscar():
+                if chave in chaves_vistas:
+                    continue
+                chaves_vistas.add(chave)
+                sessoes.append((chave, texto))
+        except Exception as e:
+            print(f"Erro ao checar {buscar.__name__}: {e}", file=sys.stderr)
 
     return sessoes
 
@@ -124,17 +219,17 @@ def main() -> None:
         # Não falha o workflow por instabilidade pontual do site
         sys.exit(0)
 
-    novas = [s for s in sessoes_atuais if s not in vistas]
+    novas = [(chave, texto) for chave, texto in sessoes_atuais if chave not in vistas]
     agora = datetime.now(timezone.utc)
 
     if novas:
         msg = "🎬 Nova sessão de Duna - Parte 3 no IMAX Palladium (Curitiba)!\n\n"
-        msg += "\n".join(f"• {s}" for s in novas)
-        msg += f"\n\n{URL_SESSOES}"
+        msg += "\n".join(f"• {texto}" for _, texto in novas)
+        msg += f"\n\n{URL_INGRESSO}\n{URL_IMAX_PALLADIUM}"
         send_telegram(msg)
         print(f"Notificação enviada: {len(novas)} sessão(ões) nova(s).")
 
-        vistas.update(sessoes_atuais)
+        vistas.update(chave for chave, _ in sessoes_atuais)
         state["sessoes_vistas"] = sorted(vistas)
         state["last_heartbeat"] = agora.isoformat()  # a notificação já conta como aviso
         save_state(state)
