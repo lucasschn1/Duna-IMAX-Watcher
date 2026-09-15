@@ -1,0 +1,41 @@
+name: Checar sessões IMAX Duna Parte 3
+
+on:
+  schedule:
+    # A cada 30 minutos. Ajuste para */10 ou */5 perto da estreia (17/12/2026).
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {} # permite rodar manualmente pela aba Actions
+
+permissions:
+  contents: write # necessário para commitar o state.json de volta
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Rodar verificação
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_duna_imax.py
+
+      - name: Commitar novo estado (se mudou)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "Atualiza sessões vistas [skip ci]"
+          git push
