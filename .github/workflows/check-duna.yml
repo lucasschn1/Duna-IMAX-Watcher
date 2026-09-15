@@ -46,12 +46,12 @@ jobs:
           git commit -m "Atualiza sessões vistas [skip ci]"
 
           for tentativa in 1 2 3 4 5; do
-            git pull --rebase --autostash origin main
-            if git push; then
+            if git pull --rebase --autostash origin main && git push; then
               echo "Push feito com sucesso na tentativa $tentativa."
               exit 0
             fi
             echo "Push falhou (tentativa $tentativa), tentando de novo em 5s..."
+            git rebase --abort >/dev/null 2>&1 || true
             sleep 5
           done
 
