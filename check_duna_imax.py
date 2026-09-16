@@ -8,8 +8,18 @@ Monitora duas fontes independentes, para não depender de uma só:
 - imaxpalladium.com.br: página do próprio cinema dedicada a este filme.
   É HTML estático, então usamos só requests + BeautifulSoup, sem navegador.
 
-O estado (sessões já vistas) fica em state.json, que o workflow do GitHub
-Actions commita de volta no repo.
+Dá pra rodar só uma parte das fontes via a env var FONTES_ATIVAS (lista
+separada por vírgula, ex: "imax_palladium"). Isso existe porque essa fonte
+é bem mais leve que a do ingresso.com/Playwright — dá pra rodar num servidor
+fraco (pouca RAM, HD) com bastante frequência, deixando a fonte pesada só
+no GitHub Actions. O import do Playwright é adiado (só acontece se a fonte
+"ingresso" estiver ativa), pra essa máquina leve nem precisar ter o pacote
+instalado.
+
+O estado (sessões já vistas) fica em state.json. No GitHub Actions, o
+workflow commita esse arquivo de volta no repo; num deploy local (ex: um
+servidor próprio), ele só precisa existir no disco — não tem por que
+versionar no git.
 """
 
 import json
@@ -21,11 +31,34 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 URL_INGRESSO = "https://www.ingresso.com/cinema/imax-shopping-palladium/sessoes?city=curitiba"
 URL_IMAX_PALLADIUM = "https://imaxpalladium.com.br/filmes/duna-parte-3/"
 STATE_FILE = Path(__file__).parent / "state.json"
+
+# Quais fontes rodar nesta máquina. Por padrão as duas; um deploy leve (ex:
+# servidor com pouca RAM) pode setar FONTES_ATIVAS=imax_palladium pra pular
+# o Playwright/Chromium por completo.
+FONTES_ATIVAS = {
+    f.strip() for f in os.environ.get("FONTES_ATIVAS", "ingresso,imax_palladium").split(",") if f.strip()
+}
+
+# Nome de exibição de cada fonte, usado nas mensagens do Telegram.
+NOME_FONTE = {
+    "ingresso": "Ingresso.com",
+    "imax_palladium": "IMAX Palladium",
+}
+
+# Identifica de onde a mensagem foi mandada (GitHub Actions, servidor
+# próprio, etc.), já que mais de um deploy roda em paralelo e cada um avisa
+# pelo mesmo bot do Telegram.
+ORIGEM = os.environ.get("ORIGEM", "GitHub Actions")
+
+# Desliga o aviso periódico de "continuo monitorando, nada encontrado".
+# Útil quando mais de um deploy roda em paralelo (ex: GitHub Actions +
+# servidor local) e o heartbeat de um já basta pra saber que está tudo
+# funcionando.
+HEARTBEAT_ATIVO = os.environ.get("HEARTBEAT_ATIVO", "1") != "0"
 
 # requests.get sem um User-Agent de navegador é bloqueado por alguns sites
 # quando a requisição vem de um IP de datacenter (como os runners do GitHub
@@ -132,6 +165,8 @@ def buscar_sessoes_ingresso() -> list[tuple[str, str]]:
     detectar novidade e para dedupe entre fontes), texto é a descrição
     mandada no Telegram.
     """
+    from playwright.sync_api import sync_playwright
+
     sessoes: list[tuple[str, str]] = []
 
     with sync_playwright() as p:
@@ -185,7 +220,7 @@ def buscar_sessoes_imax_palladium() -> list[tuple[str, str]]:
 
 
 def buscar_sessoes() -> list[tuple[str, str]]:
-    """Junta as sessões das duas fontes monitoradas.
+    """Junta as sessões das fontes ativas nesta máquina (FONTES_ATIVAS).
 
     Cada fonte é isolada em seu próprio try/except: se uma delas falhar (ex:
     site fora do ar, mudança de estrutura), a outra continua funcionando
@@ -195,7 +230,13 @@ def buscar_sessoes() -> list[tuple[str, str]]:
     sessoes: list[tuple[str, str]] = []
     chaves_vistas: set[str] = set()
 
-    for buscar in (buscar_sessoes_ingresso, buscar_sessoes_imax_palladium):
+    fontes = {
+        "ingresso": buscar_sessoes_ingresso,
+        "imax_palladium": buscar_sessoes_imax_palladium,
+    }
+    for nome, buscar in fontes.items():
+        if nome not in FONTES_ATIVAS:
+            continue
         try:
             for chave, texto in buscar():
                 if chave in chaves_vistas:
@@ -203,7 +244,7 @@ def buscar_sessoes() -> list[tuple[str, str]]:
                 chaves_vistas.add(chave)
                 sessoes.append((chave, texto))
         except Exception as e:
-            print(f"Erro ao checar {buscar.__name__}: {e}", file=sys.stderr)
+            print(f"Erro ao checar fonte '{nome}': {e}", file=sys.stderr)
 
     return sessoes
 
@@ -223,7 +264,7 @@ def main() -> None:
     agora = datetime.now(timezone.utc)
 
     if novas:
-        msg = "🎬 Nova sessão de Duna - Parte 3 no IMAX Palladium (Curitiba)!\n\n"
+        msg = f"🎬 Nova sessão de Duna - Parte 3 no IMAX Palladium (Curitiba)! (via {ORIGEM})\n\n"
         msg += "\n".join(f"• {texto}" for _, texto in novas)
         msg += f"\n\n{URL_INGRESSO}\n{URL_IMAX_PALLADIUM}"
         send_telegram(msg)
@@ -235,10 +276,16 @@ def main() -> None:
         save_state(state)
     else:
         print("Nenhuma sessão nova encontrada.")
-        if heartbeat_devido(state):
+        if not HEARTBEAT_ATIVO:
+            print("Heartbeat desativado nesta máquina (HEARTBEAT_ATIVO=0).")
+        elif heartbeat_devido(state):
+            fontes_label = ", ".join(
+                NOME_FONTE[f] for f in ("ingresso", "imax_palladium") if f in FONTES_ATIVAS
+            )
             send_telegram(
-                "🔎 Duna IMAX Watcher: continuo monitorando o IMAX Palladium "
-                "(Curitiba). Nenhuma sessão de Duna - Parte 3 encontrada até agora."
+                f"🔎 Duna IMAX Watcher ({ORIGEM}): continuo monitorando o IMAX "
+                f"Palladium (Curitiba) via {fontes_label}. Nenhuma sessão de "
+                "Duna - Parte 3 encontrada até agora."
             )
             state["last_heartbeat"] = agora.isoformat()
             save_state(state)
