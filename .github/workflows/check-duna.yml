@@ -2,8 +2,10 @@ name: Checar sessões IMAX Duna Parte 3
 
 on:
   schedule:
-    # A cada 30 minutos. Ajuste para */10 ou */5 perto da estreia (17/12/2026).
-    - cron: "*/30 * * * *"
+    # A cada 30 min, mas deslocado de :00/:30 pra fora do pico de carga do
+    # GitHub Actions (todo mundo dispara junto nesses horários redondos).
+    # Ajuste para */10 ou */5 perto da estreia (15/12/2026).
+    - cron: "7,37 * * * *"
   workflow_dispatch: {} # permite rodar manualmente pela aba Actions
 
 permissions:

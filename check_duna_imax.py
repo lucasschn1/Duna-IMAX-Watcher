@@ -77,6 +77,13 @@ HTTP_HEADERS = {
 # quando já tiver passado esse tempo desde o último heartbeat enviado.
 HEARTBEAT_INTERVAL = timedelta(hours=1)
 
+# Liga o resumo periódico (execuções, erros por fonte, sessões novas no
+# período). Pensado pro deploy que roda com mais frequência (o servidor
+# próprio): dá uma noção de "está tudo funcionando" mais informativa que um
+# heartbeat simples, sem exigir que cada deploy mande o seu.
+RESUMO_ATIVO = os.environ.get("RESUMO_ATIVO", "0") != "0"
+RESUMO_INTERVALO = timedelta(days=float(os.environ.get("RESUMO_INTERVALO_DIAS", "3")))
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -97,6 +104,17 @@ class Sessao:
     link: str
     sala: str = ""
     tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ResultadoBusca:
+    """Resultado de buscar_sessoes(): as sessões já deduplicadas, mais a
+    contagem bruta e os erros por fonte (antes do dedupe) — usados pro
+    canário (fonte que parou de achar sessão) e pro resumo periódico."""
+
+    sessoes: list[Sessao] = field(default_factory=list)
+    contagens: dict[str, int] = field(default_factory=dict)
+    erros: dict[str, str] = field(default_factory=dict)
 
 
 def load_state() -> dict:
@@ -251,7 +269,7 @@ def buscar_sessoes_imax_palladium() -> list[Sessao]:
     return sessoes
 
 
-def buscar_sessoes() -> list[Sessao]:
+def buscar_sessoes() -> ResultadoBusca:
     """Junta as sessões das fontes ativas nesta máquina (FONTES_ATIVAS).
 
     Cada fonte é isolada em seu próprio try/except: se uma delas falhar (ex:
@@ -259,7 +277,7 @@ def buscar_sessoes() -> list[Sessao]:
     normalmente em vez de derrubar o run inteiro. Se as duas fontes acharem
     a mesma sessão (mesmo sessionId), só a primeira ocorrência é mantida.
     """
-    sessoes: list[Sessao] = []
+    resultado = ResultadoBusca()
     chaves_vistas: set[str] = set()
 
     fontes = {
@@ -270,15 +288,101 @@ def buscar_sessoes() -> list[Sessao]:
         if nome not in FONTES_ATIVAS:
             continue
         try:
-            for sessao in buscar():
-                if sessao.chave in chaves_vistas:
-                    continue
-                chaves_vistas.add(sessao.chave)
-                sessoes.append(sessao)
+            encontradas = buscar()
         except Exception as e:
             print(f"Erro ao checar fonte '{nome}': {e}", file=sys.stderr)
+            resultado.erros[nome] = str(e)
+            continue
 
-    return sessoes
+        resultado.contagens[nome] = len(encontradas)
+        for sessao in encontradas:
+            if sessao.chave in chaves_vistas:
+                continue
+            chaves_vistas.add(sessao.chave)
+            resultado.sessoes.append(sessao)
+
+    return resultado
+
+
+def checar_canario(state: dict, contagens: dict[str, int]) -> list[str]:
+    """Compara a contagem de sessões desta execução com a da anterior, por
+    fonte, e retorna avisos se uma fonte que antes achava sessão passou a
+    achar 0 — sinal de que o site pode ter mudado de estrutura (o parser
+    quebrou) em vez de simplesmente "ainda não tem sessão".
+
+    O aviso é disparado só na transição (>0 -> 0), não a cada execução
+    enquanto continuar zerado, pra não virar spam.
+    """
+    anteriores = state.setdefault("contagem_por_fonte", {})
+    alertados = state.setdefault("canario_alertado", {})
+    avisos = []
+
+    for fonte, atual in contagens.items():
+        anterior = anteriores.get(fonte, 0)
+        if atual == 0 and anterior > 0 and not alertados.get(fonte):
+            avisos.append(
+                f"⚠️ <b>Possível problema na fonte {html.escape(NOME_FONTE.get(fonte, fonte))}</b>\n"
+                f"Achava {anterior} sessão(ões) e agora não acha nenhuma. Pode ser "
+                "o site fora do ar ou uma mudança de estrutura — vale checar manualmente."
+            )
+            alertados[fonte] = True
+        elif atual > 0:
+            alertados[fonte] = False
+        anteriores[fonte] = atual
+
+    return avisos
+
+
+def atualizar_resumo(state: dict, sessoes_novas: int, erros: dict[str, str], agora: datetime) -> None:
+    resumo = state.setdefault(
+        "resumo", {"desde": None, "execucoes": 0, "sessoes_novas": 0, "erros_por_fonte": {}}
+    )
+    if not resumo.get("desde"):
+        resumo["desde"] = agora.isoformat()
+    resumo["execucoes"] = resumo.get("execucoes", 0) + 1
+    resumo["sessoes_novas"] = resumo.get("sessoes_novas", 0) + sessoes_novas
+    erros_por_fonte = resumo.setdefault("erros_por_fonte", {})
+    for fonte in erros:
+        erros_por_fonte[fonte] = erros_por_fonte.get(fonte, 0) + 1
+
+
+def resumo_devido(state: dict) -> bool:
+    desde = (state.get("resumo") or {}).get("desde")
+    if not desde:
+        return False
+    return datetime.now(timezone.utc) - datetime.fromisoformat(desde) >= RESUMO_INTERVALO
+
+
+def montar_resumo(state: dict, agora: datetime) -> str:
+    resumo = state.get("resumo", {})
+    desde_dt = datetime.fromisoformat(resumo["desde"])
+    dias = max(1, round((agora - desde_dt).total_seconds() / 86400))
+    execucoes = resumo.get("execucoes", 0)
+    sessoes_novas = resumo.get("sessoes_novas", 0)
+    erros_por_fonte = resumo.get("erros_por_fonte", {})
+    total_erros = sum(erros_por_fonte.values())
+
+    linhas = [
+        f"📊 <b>Resumo dos últimos {dias} dia(s)</b> ({html.escape(ORIGEM)})",
+        f"✅ {execucoes} checagem(ns) · 🎬 {sessoes_novas} sessão(ões) nova(s)",
+    ]
+    if total_erros:
+        detalhes = ", ".join(
+            f"{html.escape(NOME_FONTE.get(f, f))}: {n}" for f, n in erros_por_fonte.items() if n
+        )
+        linhas.append(f"⚠️ {total_erros} erro(s) — {detalhes}")
+    else:
+        linhas.append("Sem erros no período.")
+    return "\n".join(linhas)
+
+
+def reiniciar_resumo(state: dict, agora: datetime) -> None:
+    state["resumo"] = {
+        "desde": agora.isoformat(),
+        "execucoes": 0,
+        "sessoes_novas": 0,
+        "erros_por_fonte": {},
+    }
 
 
 def montar_mensagem_novas(novas: list[Sessao]) -> str:
@@ -317,25 +421,30 @@ def montar_mensagem_novas(novas: list[Sessao]) -> str:
 def main() -> None:
     state = load_state()
     vistas = set(state.get("sessoes_vistas", []))
+    agora = datetime.now(timezone.utc)
 
     try:
-        sessoes_atuais = buscar_sessoes()
+        resultado = buscar_sessoes()
     except Exception as e:
         print(f"Erro ao checar a página: {e}", file=sys.stderr)
         # Não falha o workflow por instabilidade pontual do site
         sys.exit(0)
 
-    novas = [s for s in sessoes_atuais if s.chave not in vistas]
-    agora = datetime.now(timezone.utc)
+    novas = [s for s in resultado.sessoes if s.chave not in vistas]
+
+    for aviso in checar_canario(state, resultado.contagens):
+        send_telegram(aviso, parse_mode="HTML")
+        print("Alerta de canário enviado.")
+
+    atualizar_resumo(state, sessoes_novas=len(novas), erros=resultado.erros, agora=agora)
 
     if novas:
         send_telegram(montar_mensagem_novas(novas), parse_mode="HTML")
         print(f"Notificação enviada: {len(novas)} sessão(ões) nova(s).")
 
-        vistas.update(s.chave for s in sessoes_atuais)
+        vistas.update(s.chave for s in resultado.sessoes)
         state["sessoes_vistas"] = sorted(vistas)
         state["last_heartbeat"] = agora.isoformat()  # a notificação já conta como aviso
-        save_state(state)
     else:
         print("Nenhuma sessão nova encontrada.")
         if not HEARTBEAT_ATIVO:
@@ -351,10 +460,16 @@ def main() -> None:
                 parse_mode="HTML",
             )
             state["last_heartbeat"] = agora.isoformat()
-            save_state(state)
             print("Heartbeat enviado.")
         else:
             print("Heartbeat ainda não é devido.")
+
+    if RESUMO_ATIVO and resumo_devido(state):
+        send_telegram(montar_resumo(state, agora), parse_mode="HTML")
+        reiniciar_resumo(state, agora)
+        print("Resumo enviado.")
+
+    save_state(state)
 
 
 if __name__ == "__main__":

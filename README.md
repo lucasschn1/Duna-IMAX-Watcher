@@ -86,6 +86,19 @@ Env vars que controlam isso:
   e cada sessão notificada já diz de qual site veio ([Ingresso.com] ou
   [IMAX Palladium]), mas não de qual máquina. No servidor próprio, use algo
   como `ORIGEM=Servidor` pra diferenciar.
+- `RESUMO_ATIVO` (padrão `0`): `1` liga um resumo periódico ("X checagens,
+  Y sessões novas, Z erros") — pensado pro deploy que roda com mais
+  frequência, já que ele tem uma amostra maior e mais confiável que o
+  heartbeat do GitHub Actions (que já sofre com o atraso do `schedule`).
+  Fica desligado por padrão nos dois deploys pra não duplicar.
+- `RESUMO_INTERVALO_DIAS` (padrão `3`): de quantos em quantos dias manda
+  esse resumo.
+
+Independente de `HEARTBEAT_ATIVO`/`RESUMO_ATIVO`, todo deploy tem um
+"canário": se uma fonte que antes achava sessão passar a achar 0 de
+repente (ex: o site mudou de estrutura e o parser quebrou, em vez de
+simplesmente "ainda não abriu venda"), sai um alerta imediato — só uma vez
+por transição, sem virar spam enquanto continuar zerado.
 
 Passos num servidor Ubuntu, por exemplo:
 
@@ -104,6 +117,7 @@ TELEGRAM_CHAT_ID=xxxx
 FONTES_ATIVAS=imax_palladium
 HEARTBEAT_ATIVO=0
 ORIGEM=Servidor
+RESUMO_ATIVO=1
 ```
 
 ```bash
