@@ -22,10 +22,12 @@ servidor próprio), ele só precisa existir no disco — não tem por que
 versionar no git.
 """
 
+import html
 import json
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -83,6 +85,20 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TITULO_FILME = "duna"
 
 
+@dataclass
+class Sessao:
+    """Uma sessão de cinema, já normalizada pro mesmo formato nas duas
+    fontes, pra dar pra montar uma mensagem de Telegram arrumada."""
+
+    chave: str  # sessionId (dedupe entre fontes e detecção de novidade)
+    fonte: str  # "Ingresso.com" ou "IMAX Palladium"
+    data: str  # dd/mm/aaaa
+    hora: str  # HH:MM
+    link: str
+    sala: str = ""
+    tags: list[str] = field(default_factory=list)
+
+
 def load_state() -> dict:
     if STATE_FILE.exists():
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -106,20 +122,21 @@ def save_state(state: dict) -> None:
     )
 
 
-def send_telegram(mensagem: str) -> None:
+def send_telegram(mensagem: str, parse_mode: str | None = None) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não configurados; pulando envio.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    resp = requests.post(
-        url,
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": mensagem,
-            "disable_web_page_preview": False,
-        },
-        timeout=15,
-    )
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": mensagem,
+        # Sem preview: uma mensagem com vários links de sessão geraria uma
+        # parede de cards de preview embaixo do texto.
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    resp = requests.post(url, data=payload, timeout=15)
     resp.raise_for_status()
 
 
@@ -156,18 +173,16 @@ def extrair_session_id(link: str) -> str | None:
     return m.group(1) if m else None
 
 
-def buscar_sessoes_ingresso() -> list[tuple[str, str]]:
+def buscar_sessoes_ingresso() -> list[Sessao]:
     """Abre a página de sessões do cinema no ingresso.com (via Playwright) e
     extrai as sessões de Duna - Parte 3.
 
     A página lista TODOS os filmes em cartaz, então filtramos pelo título do
-    filme. Retorna pares (chave, texto): chave é o sessionId (usado para
-    detectar novidade e para dedupe entre fontes), texto é a descrição
-    mandada no Telegram.
+    filme.
     """
     from playwright.sync_api import sync_playwright
 
-    sessoes: list[tuple[str, str]] = []
+    sessoes: list[Sessao] = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -184,16 +199,28 @@ def buscar_sessoes_ingresso() -> list[tuple[str, str]]:
             inicio = evento.get("startDate", "")
             formato = evento.get("name", "")
             link = (evento.get("offers") or {}).get("url", "")
-            texto = f"[Ingresso.com] {inicio} | {formato} | {link}"
-            chave = extrair_session_id(link) or texto
-            sessoes.append((chave, texto))
+
+            try:
+                dt = datetime.fromisoformat(inicio)
+                data, hora = dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M")
+            except ValueError:
+                data, hora = inicio, ""
+
+            # "Duna - Parte 3 – IMAX, Dublado" -> ["IMAX", "Dublado"]
+            partes = re.split(r"[–-]", formato)
+            tags = [p.strip() for p in partes[-1].split(",")] if len(partes) > 1 else []
+
+            chave = extrair_session_id(link) or f"{inicio}|{formato}|{link}"
+            sessoes.append(
+                Sessao(chave=chave, fonte="Ingresso.com", data=data, hora=hora, link=link, tags=tags)
+            )
 
         browser.close()
 
     return sessoes
 
 
-def buscar_sessoes_imax_palladium() -> list[tuple[str, str]]:
+def buscar_sessoes_imax_palladium() -> list[Sessao]:
     """Busca as sessões de Duna - Parte 3 direto na página do IMAX Palladium.
 
     Ao contrário do ingresso.com, essa página é dedicada só a este filme
@@ -204,7 +231,7 @@ def buscar_sessoes_imax_palladium() -> list[tuple[str, str]]:
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    sessoes: list[tuple[str, str]] = []
+    sessoes: list[Sessao] = []
     for item in soup.select("a.sessao-item"):
         dia = item.get("data-dia", "")
         ano = item.get("data-ano", "")
@@ -212,14 +239,19 @@ def buscar_sessoes_imax_palladium() -> list[tuple[str, str]]:
         sala_el = item.select_one(".sessao-item__sala")
         sala = sala_el.get_text(strip=True) if sala_el else ""
         tags = [t.get_text(strip=True) for t in item.select(".sessao-item__tag")]
+        if "bg-imax" in item.get("class", []):
+            tags.insert(0, "IMAX")
         link = item.get("href", "")
-        texto = f"[IMAX Palladium] {dia}/{ano} {hora} - {sala} - {'/'.join(tags)} - {link}"
-        chave = extrair_session_id(link) or texto
-        sessoes.append((chave, texto))
+
+        data = f"{dia}/{ano}" if dia and ano else dia
+        chave = extrair_session_id(link) or f"{data}|{hora}|{link}"
+        sessoes.append(
+            Sessao(chave=chave, fonte="IMAX Palladium", data=data, hora=hora, link=link, sala=sala, tags=tags)
+        )
     return sessoes
 
 
-def buscar_sessoes() -> list[tuple[str, str]]:
+def buscar_sessoes() -> list[Sessao]:
     """Junta as sessões das fontes ativas nesta máquina (FONTES_ATIVAS).
 
     Cada fonte é isolada em seu próprio try/except: se uma delas falhar (ex:
@@ -227,7 +259,7 @@ def buscar_sessoes() -> list[tuple[str, str]]:
     normalmente em vez de derrubar o run inteiro. Se as duas fontes acharem
     a mesma sessão (mesmo sessionId), só a primeira ocorrência é mantida.
     """
-    sessoes: list[tuple[str, str]] = []
+    sessoes: list[Sessao] = []
     chaves_vistas: set[str] = set()
 
     fontes = {
@@ -238,15 +270,48 @@ def buscar_sessoes() -> list[tuple[str, str]]:
         if nome not in FONTES_ATIVAS:
             continue
         try:
-            for chave, texto in buscar():
-                if chave in chaves_vistas:
+            for sessao in buscar():
+                if sessao.chave in chaves_vistas:
                     continue
-                chaves_vistas.add(chave)
-                sessoes.append((chave, texto))
+                chaves_vistas.add(sessao.chave)
+                sessoes.append(sessao)
         except Exception as e:
             print(f"Erro ao checar fonte '{nome}': {e}", file=sys.stderr)
 
     return sessoes
+
+
+def montar_mensagem_novas(novas: list[Sessao]) -> str:
+    """Monta a mensagem HTML de "sessão nova", agrupada por data e ordenada
+    por horário, com um link "Comprar" por sessão em vez do link cru."""
+    por_data: dict[str, list[Sessao]] = {}
+    for s in novas:
+        por_data.setdefault(s.data, []).append(s)
+
+    def chave_ordenacao(data_str: str):
+        try:
+            return datetime.strptime(data_str, "%d/%m/%Y")
+        except ValueError:
+            return datetime.max
+
+    linhas = [
+        "🎬 <b>Nova sessão: Duna - Parte 3</b>",
+        f"📍 IMAX Palladium (Curitiba) · via <i>{html.escape(ORIGEM)}</i>",
+        "",
+    ]
+    for data in sorted(por_data, key=chave_ordenacao):
+        linhas.append(f"🗓 <b>{html.escape(data)}</b>")
+        for s in sorted(por_data[data], key=lambda s: s.hora):
+            detalhes = html.escape(" · ".join(filter(None, [s.sala, *s.tags])))
+            link_html = f'<a href="{html.escape(s.link, quote=True)}">Comprar</a>' if s.link else ""
+            linhas.append(f"  🕐 {html.escape(s.hora)} · {detalhes} — {link_html}")
+        linhas.append("")
+
+    linhas.append(
+        f'🔗 <a href="{html.escape(URL_INGRESSO, quote=True)}">Ingresso.com</a> · '
+        f'<a href="{html.escape(URL_IMAX_PALLADIUM, quote=True)}">IMAX Palladium</a>'
+    )
+    return "\n".join(linhas)
 
 
 def main() -> None:
@@ -260,17 +325,14 @@ def main() -> None:
         # Não falha o workflow por instabilidade pontual do site
         sys.exit(0)
 
-    novas = [(chave, texto) for chave, texto in sessoes_atuais if chave not in vistas]
+    novas = [s for s in sessoes_atuais if s.chave not in vistas]
     agora = datetime.now(timezone.utc)
 
     if novas:
-        msg = f"🎬 Nova sessão de Duna - Parte 3 no IMAX Palladium (Curitiba)! (via {ORIGEM})\n\n"
-        msg += "\n".join(f"• {texto}" for _, texto in novas)
-        msg += f"\n\n{URL_INGRESSO}\n{URL_IMAX_PALLADIUM}"
-        send_telegram(msg)
+        send_telegram(montar_mensagem_novas(novas), parse_mode="HTML")
         print(f"Notificação enviada: {len(novas)} sessão(ões) nova(s).")
 
-        vistas.update(chave for chave, _ in sessoes_atuais)
+        vistas.update(s.chave for s in sessoes_atuais)
         state["sessoes_vistas"] = sorted(vistas)
         state["last_heartbeat"] = agora.isoformat()  # a notificação já conta como aviso
         save_state(state)
@@ -283,9 +345,10 @@ def main() -> None:
                 NOME_FONTE[f] for f in ("ingresso", "imax_palladium") if f in FONTES_ATIVAS
             )
             send_telegram(
-                f"🔎 Duna IMAX Watcher ({ORIGEM}): continuo monitorando o IMAX "
-                f"Palladium (Curitiba) via {fontes_label}. Nenhuma sessão de "
-                "Duna - Parte 3 encontrada até agora."
+                f"🔎 <b>Duna IMAX Watcher</b> ({html.escape(ORIGEM)})\n"
+                f"Monitorando IMAX Palladium (Curitiba) via {html.escape(fontes_label)}.\n"
+                "Nenhuma sessão de Duna - Parte 3 até agora.",
+                parse_mode="HTML",
             )
             state["last_heartbeat"] = agora.isoformat()
             save_state(state)
