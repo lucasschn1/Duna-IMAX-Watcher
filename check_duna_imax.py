@@ -422,6 +422,10 @@ def main() -> None:
     state = load_state()
     vistas = set(state.get("sessoes_vistas", []))
     agora = datetime.now(timezone.utc)
+    # Ao contrário de last_heartbeat (só atualiza quando um aviso sai), esse
+    # campo marca toda execução — é o que o bot de comandos usa pra
+    # responder "última execução" no /status.
+    state["last_run"] = agora.isoformat()
 
     try:
         resultado = buscar_sessoes()

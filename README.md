@@ -161,3 +161,52 @@ sudo systemctl enable --now duna-watcher.timer
 
 `state.json` fica só nessa pasta local, sem git — não precisa (e não deve)
 ser commitado de volta pro repositório.
+
+## Bot de comandos (opcional, só no deploy com servidor próprio)
+
+Além dos avisos automáticos, dá pra mandar uma mensagem pro bot e ele
+responder na hora, com dois comandos (sem diferenciar maiúsc./minúsc., com
+ou sem `/` na frente):
+
+- `status` — sessões já vistas, quando foi a última execução, e se alguma
+  fonte está com o canário disparado (parou de achar sessão).
+- `resumo` — o mesmo texto do resumo periódico, mas sob demanda, sem
+  esperar `RESUMO_INTERVALO_DIAS` nem resetar o contador.
+
+Isso é feito com `duna_watcher_bot.py`, via long polling
+(`getUpdates`) — o processo fica de olho por mensagens novas sem precisar
+expor nenhuma porta nem endereço público (só chamadas de saída pro
+Telegram, iguais às de mandar mensagem). Só responde a mensagens vindas do
+`TELEGRAM_CHAT_ID` configurado; qualquer outro remetente é ignorado.
+
+Diferente do `check_duna_imax.py` (chamado sob demanda pelo timer), esse
+script é um **processo contínuo** — precisa do seu próprio serviço
+systemd, `Type=simple` (não `oneshot`+timer). Copie `duna_watcher_bot.py`
+pra mesma pasta (`~/duna-watcher`) e crie
+`/etc/systemd/system/duna-watcher-bot.service`:
+
+```ini
+[Unit]
+Description=Duna IMAX Watcher - bot de comandos (Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/duna-watcher.env
+WorkingDirectory=/home/SEU_USUARIO/duna-watcher
+ExecStart=/home/SEU_USUARIO/duna-watcher/venv/bin/python -u duna_watcher_bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+(o `-u` evita que a saída fique presa em buffer e não apareça no
+`journalctl` em tempo real.)
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now duna-watcher-bot.service
+```
