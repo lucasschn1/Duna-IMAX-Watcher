@@ -7,8 +7,8 @@
     "86895996",
     "86896003"
   ],
-  "last_heartbeat": "2026-09-20T00:22:27.381586+00:00",
-  "last_run": "2026-09-20T00:22:27.381586+00:00",
+  "last_heartbeat": "2026-09-20T05:22:51.497270+00:00",
+  "last_run": "2026-09-20T05:22:51.497270+00:00",
   "contagem_por_fonte": {
     "ingresso": 0,
     "imax_palladium": 6
@@ -18,7 +18,7 @@
   },
   "resumo": {
     "desde": "2026-09-16T21:14:49.015389+00:00",
-    "execucoes": 22,
+    "execucoes": 23,
     "sessoes_novas": 0,
     "erros_por_fonte": {
       "ingresso": 1
