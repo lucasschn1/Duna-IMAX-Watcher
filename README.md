@@ -59,6 +59,25 @@ de "sessão já vista" — assim, se as duas fontes acharem a mesma sessão, só
 a primeira notifica, sem duplicar aviso. Se uma fonte falhar (site fora do
 ar, mudança de estrutura), a outra continua funcionando normalmente.
 
+## Notificações
+
+Só tocam som as mensagens que pedem alguma ação; as de rotina chegam em
+silêncio.
+
+| Mensagem | Quando | Som |
+| --- | --- | --- |
+| 🟢 NOVA DATA / NOVA SESSÃO | sessão nova; "nova data" quando abre a venda de um dia que ainda não tinha sessão | sim |
+| 🟠 SESSÃO REMOVIDA | sessão futura some de todas as fontes por 2 checagens seguidas (esgotou, cancelou ou mudou de horário) | sim |
+| 🟢 SESSÃO DE VOLTA | sessão removida reaparece | sim |
+| 🟡 FONTE PAUSADA / 🟢 FONTE VOLTOU | site bloqueou o acesso / voltou a responder | sim |
+| ⚠️ possível problema na fonte | fonte que achava sessões passa a achar 0 | sim |
+| 🔴 NENHUMA SESSÃO NOVA | heartbeat de hora em hora | não |
+| 🟢/🔴 RESUMO | resumo periódico | não |
+
+As sessões novas vêm com dia da semana, preço (quando o ingresso.com
+informa) e um botão de compra por sessão (até 8; acima disso, links
+"COMPRAR" no texto).
+
 ## Deploy adicional num servidor próprio (opcional)
 
 O `schedule` do GitHub Actions é "melhor esforço": pode atrasar horas em

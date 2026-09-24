@@ -93,6 +93,10 @@ STATUS_BLOQUEIO = {403, 429}
 PAUSA_BLOQUEIO = timedelta(minutes=float(os.environ.get("PAUSA_BLOQUEIO_MIN", "60")))
 PAUSA_MAXIMA = timedelta(hours=6)
 
+# Quantas checagens seguidas uma sessão precisa estar ausente de todas as
+# fontes pra sair o aviso de "sessão removida" (ver checar_removidas).
+AUSENCIAS_PRA_AVISAR = 2
+
 # Horário de Brasília pra exibir nas mensagens (sem horário de verão desde
 # 2019, então um offset fixo basta e evita depender do tzdata no Windows).
 FUSO_BR = timezone(timedelta(hours=-3))
@@ -117,6 +121,18 @@ class Sessao:
     link: str
     sala: str = ""
     tags: list[str] = field(default_factory=list)
+    preco: float | None = None  # só a API do ingresso.com informa
+
+    def para_state(self) -> dict:
+        return {
+            "chave": self.chave,
+            "data": self.data,
+            "hora": self.hora,
+            "sala": self.sala,
+            "tags": self.tags,
+            "link": self.link,
+            "preco": self.preco,
+        }
 
 
 @dataclass
@@ -156,7 +172,18 @@ def save_state(state: dict) -> None:
     )
 
 
-def send_telegram(mensagem: str, parse_mode: str | None = None) -> None:
+def send_telegram(
+    mensagem: str,
+    parse_mode: str | None = None,
+    silencioso: bool = False,
+    botoes: list[list[tuple[str, str]]] | None = None,
+) -> None:
+    """Envia a mensagem pro chat configurado.
+
+    `silencioso` entrega sem som/vibração — usado nos avisos de rotina
+    (nada novo, resumo), pra que o celular só toque quando há algo a fazer.
+    `botoes` são linhas de botões de link (texto, url) embaixo da mensagem.
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não configurados; pulando envio.")
         return
@@ -167,9 +194,14 @@ def send_telegram(mensagem: str, parse_mode: str | None = None) -> None:
         # Sem preview: uma mensagem com vários links de sessão geraria uma
         # parede de cards de preview embaixo do texto.
         "disable_web_page_preview": True,
+        "disable_notification": silencioso,
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if botoes:
+        payload["reply_markup"] = json.dumps(
+            {"inline_keyboard": [[{"text": t, "url": u} for t, u in linha] for linha in botoes]}
+        )
     resp = requests.post(url, data=payload, timeout=15)
     resp.raise_for_status()
 
@@ -231,6 +263,7 @@ def buscar_sessoes_ingresso() -> list[Sessao]:
                                 link=link,
                                 sala=s.get("room") or "",
                                 tags=list(s.get("type") or []),
+                                preco=s.get("price"),
                             )
                         )
 
@@ -550,41 +583,171 @@ def reiniciar_resumo(state: dict, agora: datetime) -> None:
     }
 
 
-def montar_mensagem_novas(novas: list[Sessao]) -> str:
-    """Monta a mensagem HTML de "sessão nova", agrupada por data e ordenada
-    por horário, com um link "Comprar" por sessão em vez do link cru.
+DIAS_SEMANA = ["SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"]
+
+# Acima disso, a mensagem de sessão nova não ganha um botão por sessão (vira
+# uma parede de botões) — os links "COMPRAR" ficam no texto.
+MAX_BOTOES_SESSAO = 8
+
+
+def chave_data(data_str: str) -> datetime:
+    """Pra ordenar datas dd/mm/aaaa; data em formato inesperado vai pro fim."""
+    try:
+        return datetime.strptime(data_str, "%d/%m/%Y")
+    except ValueError:
+        return datetime.max
+
+
+def rotulo_data(data_str: str, com_ano: bool = True) -> str:
+    """"15/12/2026" -> "TER 15/12/2026" (ou "TER 15/12" sem o ano)."""
+    try:
+        dt = datetime.strptime(data_str, "%d/%m/%Y")
+    except ValueError:
+        return data_str
+    return f"{DIAS_SEMANA[dt.weekday()]} {dt.strftime('%d/%m/%Y' if com_ano else '%d/%m')}"
+
+
+def formatar_preco(preco: float | None) -> str:
+    return f"R$ {preco:.2f}".replace(".", ",") if preco else ""
+
+
+def inicio_sessao(data: str, hora: str) -> datetime | None:
+    try:
+        return datetime.strptime(f"{data} {hora}", "%d/%m/%Y %H:%M").replace(tzinfo=FUSO_BR)
+    except ValueError:
+        return None
+
+
+def descrever_sessao(s: dict) -> str:
+    """"SALA 1 · IMAX · DUBLADO · R$ 47,76" a partir de Sessao.para_state()."""
+    return " · ".join(filter(None, [s.get("sala"), *s.get("tags", []), formatar_preco(s.get("preco"))])).upper()
+
+
+def montar_mensagem_novas(
+    novas: list[Sessao], datas_novas: set[str]
+) -> tuple[str, list[list[tuple[str, str]]]]:
+    """Monta a mensagem HTML de "sessão nova", agrupada por data (com dia da
+    semana) e ordenada por horário, mais os botões de compra.
 
     Tudo em maiúsculas e com 🟢 (o Telegram não permite colorir texto), pra
     diferenciar de relance do aviso de "nada encontrado" (🔴). Só o texto
-    visível vai pra maiúsculas — as URLs dos links ficam intactas."""
+    visível vai pra maiúsculas — as URLs dos links ficam intactas.
+
+    `datas_novas` são as datas que não tinham nenhuma sessão antes: abrir a
+    venda de um dia novo é mais urgente que um horário extra num dia já
+    aberto, então ganha título e marcação 🆕 próprios.
+    """
     por_data: dict[str, list[Sessao]] = {}
     for s in novas:
         por_data.setdefault(s.data, []).append(s)
+    datas = sorted(por_data, key=chave_data)
 
-    def chave_ordenacao(data_str: str):
-        try:
-            return datetime.strptime(data_str, "%d/%m/%Y")
-        except ValueError:
-            return datetime.max
+    if datas_novas:
+        titulo = "NOVA DATA" if len(datas_novas) == 1 else "NOVAS DATAS"
+        linhas = [f"🟢🟢🟢 <b>{titulo}: DUNA - PARTE 3</b> 🟢🟢🟢"]
+        for data in sorted(datas_novas, key=chave_data):
+            linhas.append(
+                f"🆕 <b>ABRIU A VENDA DE {html.escape(rotulo_data(data))}</b> "
+                f"({len(por_data.get(data, []))} SESSÃO(ÕES))"
+            )
+    else:
+        linhas = ["🟢🟢🟢 <b>NOVA SESSÃO: DUNA - PARTE 3</b> 🟢🟢🟢"]
+    linhas += [f"📍 IMAX PALLADIUM (CURITIBA) · VIA <i>{html.escape(ORIGEM.upper())}</i>", ""]
 
-    linhas = [
-        "🟢🟢🟢 <b>NOVA SESSÃO: DUNA - PARTE 3</b> 🟢🟢🟢",
-        f"📍 IMAX PALLADIUM (CURITIBA) · VIA <i>{html.escape(ORIGEM.upper())}</i>",
-        "",
-    ]
-    for data in sorted(por_data, key=chave_ordenacao):
-        linhas.append(f"🗓 <b>{html.escape(data)}</b>")
+    com_botao_por_sessao = len(novas) <= MAX_BOTOES_SESSAO
+    for data in datas:
+        marca = "🆕 " if data in datas_novas else ""
+        linhas.append(f"🗓 <b>{marca}{html.escape(rotulo_data(data))}</b>")
         for s in sorted(por_data[data], key=lambda s: s.hora):
-            detalhes = html.escape(" · ".join(filter(None, [s.sala, *s.tags])).upper())
-            link_html = f'<a href="{html.escape(s.link, quote=True)}">COMPRAR</a>' if s.link else ""
-            linhas.append(f"  🕐 {html.escape(s.hora)} · {detalhes} — {link_html}")
+            detalhes = html.escape(descrever_sessao(s.para_state()))
+            linha = f"  🕐 {html.escape(s.hora)} · {detalhes}"
+            if s.link and not com_botao_por_sessao:
+                linha += f' — <a href="{html.escape(s.link, quote=True)}">COMPRAR</a>'
+            linhas.append(linha)
         linhas.append("")
 
-    linhas.append(
-        f'🔗 <a href="{html.escape(URL_INGRESSO, quote=True)}">INGRESSO.COM</a> · '
-        f'<a href="{html.escape(URL_IMAX_PALLADIUM, quote=True)}">IMAX PALLADIUM</a>'
-    )
-    return "\n".join(linhas)
+    botoes_sessao = []
+    if com_botao_por_sessao:
+        for data in datas:
+            for s in sorted(por_data[data], key=lambda s: s.hora):
+                if s.link:
+                    idioma = "/".join(t[:3] for t in s.tags if t.upper() != "IMAX").upper()
+                    botoes_sessao.append(
+                        (f"🎟 {rotulo_data(data, com_ano=False)} {s.hora} {idioma}".strip(), s.link)
+                    )
+    else:
+        linhas.append("👆 TOQUE EM <b>COMPRAR</b> NA SESSÃO DESEJADA")
+    botoes = [botoes_sessao[i : i + 2] for i in range(0, len(botoes_sessao), 2)]
+    botoes.append([("📋 INGRESSO.COM", URL_INGRESSO), ("📋 IMAX PALLADIUM", URL_IMAX_PALLADIUM)])
+    return "\n".join(linhas).rstrip(), botoes
+
+
+def checar_removidas(state: dict, resultado: ResultadoBusca, agora: datetime) -> list[str]:
+    """Detecta sessões já vistas que sumiram das fontes (esgotou, cancelou ou
+    mudou de horário) e as que voltaram depois de sumir.
+
+    Pra não gerar alarme falso:
+    - só avalia quando TODAS as fontes ativas responderam sem erro/pausa, e
+      não quando nenhuma sessão veio (aí é mais provável o parser ter
+      quebrado — isso é papel do canário);
+    - sessão que já aconteceu é ignorada (some naturalmente);
+    - só avisa depois de AUSENCIAS_PRA_AVISAR checagens seguidas sem ela.
+    Os detalhes da sessão ausente ficam em state["ausentes"], porque
+    sessoes_atuais é sobrescrita a cada execução.
+    """
+    if set(resultado.contagens) != FONTES_ATIVAS or not resultado.sessoes:
+        return []
+
+    atuais = {s.chave for s in resultado.sessoes}
+    anteriores = {s["chave"]: s for s in state.get("sessoes_atuais") or [] if s.get("chave")}
+    ausentes = state.setdefault("ausentes", {})
+    for chave, info in anteriores.items():
+        if chave not in atuais and chave not in ausentes:
+            ausentes[chave] = {"info": info, "checagens": 0, "avisado": False}
+
+    removidas, voltaram = [], []
+    for chave in list(ausentes):
+        registro = ausentes[chave]
+        info = registro["info"]
+        inicio = inicio_sessao(info.get("data", ""), info.get("hora", ""))
+        if inicio is None or inicio <= agora:
+            del ausentes[chave]  # já aconteceu: sumir é o esperado
+            continue
+        if chave in atuais:
+            if registro["avisado"]:
+                voltaram.append(info)
+            del ausentes[chave]
+            continue
+        registro["checagens"] += 1
+        if registro["checagens"] >= AUSENCIAS_PRA_AVISAR and not registro["avisado"]:
+            registro["avisado"] = True
+            removidas.append(info)
+
+    def listar(sessoes: list[dict]) -> list[str]:
+        return [
+            f"🗓 {html.escape(rotulo_data(s['data']))} · 🕐 {html.escape(s['hora'])} · "
+            f"{html.escape(descrever_sessao(s))}"
+            for s in sorted(sessoes, key=lambda s: (chave_data(s["data"]), s["hora"]))
+        ]
+
+    avisos = []
+    if removidas:
+        avisos.append(
+            "\n".join(
+                [f"🟠 <b>SESSÃO(ÕES) REMOVIDA(S): DUNA - PARTE 3</b> ({html.escape(ORIGEM.upper())})"]
+                + listar(removidas)
+                + ["SUMIU DE TODAS AS FONTES: PODE TER ESGOTADO, SIDO CANCELADA OU MUDADO DE HORÁRIO."]
+            )
+        )
+    if voltaram:
+        avisos.append(
+            "\n".join(
+                [f"🟢 <b>SESSÃO(ÕES) DE VOLTA: DUNA - PARTE 3</b> ({html.escape(ORIGEM.upper())})"]
+                + listar(voltaram)
+                + ["VOLTOU A APARECER À VENDA (PODEM TER LIBERADO INGRESSOS)."]
+            )
+        )
+    return avisos
 
 
 def montar_mensagem_sem_novidade() -> str:
@@ -634,19 +797,32 @@ def main() -> None:
 
     atualizar_resumo(state, sessoes_novas=len(novas), erros=resultado.erros, agora=agora)
 
-    # Detalhes das sessões atuais, só pro /status do bot poder listá-las
-    # (sessoes_vistas guarda só os ids). Não sobrescreve se todas as fontes
-    # falharam, pra não apagar a lista por causa de instabilidade.
+    # Tem que rodar antes de sobrescrever sessoes_atuais: compara com ela.
+    for aviso in checar_removidas(state, resultado, agora):
+        send_telegram(aviso, parse_mode="HTML")
+        print("Aviso de sessão removida/de volta enviado.")
+
+    # Datas que já tiveram sessão, pra destacar quando abre a venda de um
+    # dia novo. Na primeira vez, parte do que já se conhecia (sessões da
+    # execução anterior, ou as já vistas), pra não anunciar tudo como novo.
+    if "datas_conhecidas" not in state:
+        base = {s["data"] for s in state.get("sessoes_atuais") or []}
+        state["datas_conhecidas"] = sorted(base or {s.data for s in resultado.sessoes if s.chave in vistas})
+    conhecidas = set(state["datas_conhecidas"])
+    datas_novas = {s.data for s in novas} - conhecidas
+    state["datas_conhecidas"] = sorted(conhecidas | {s.data for s in resultado.sessoes}, key=chave_data)
+
+    # Detalhes das sessões atuais, pro /status do bot listá-las e pro
+    # checar_removidas (sessoes_vistas guarda só os ids). Não sobrescreve se
+    # todas as fontes falharam, pra não apagar a lista por instabilidade.
     if resultado.contagens:
-        state["sessoes_atuais"] = [
-            {"data": s.data, "hora": s.hora, "sala": s.sala, "tags": s.tags, "link": s.link}
-            for s in resultado.sessoes
-        ]
+        state["sessoes_atuais"] = [s.para_state() for s in resultado.sessoes]
 
     if novas:
         state["ultima_sessao_nova"] = agora.isoformat()
-        send_telegram(montar_mensagem_novas(novas), parse_mode="HTML")
-        print(f"Notificação enviada: {len(novas)} sessão(ões) nova(s).")
+        texto, botoes = montar_mensagem_novas(novas, datas_novas)
+        send_telegram(texto, parse_mode="HTML", botoes=botoes)
+        print(f"Notificação enviada: {len(novas)} sessão(ões) nova(s), {len(datas_novas)} data(s) nova(s).")
 
         vistas.update(s.chave for s in resultado.sessoes)
         state["sessoes_vistas"] = sorted(vistas)
@@ -656,14 +832,14 @@ def main() -> None:
         if not HEARTBEAT_ATIVO:
             print("Heartbeat desativado nesta máquina (HEARTBEAT_ATIVO=0).")
         elif heartbeat_devido(state):
-            send_telegram(montar_mensagem_sem_novidade(), parse_mode="HTML")
+            send_telegram(montar_mensagem_sem_novidade(), parse_mode="HTML", silencioso=True)
             state["last_heartbeat"] = agora.isoformat()
             print("Heartbeat enviado.")
         else:
             print("Heartbeat ainda não é devido.")
 
     if RESUMO_ATIVO and resumo_devido(state):
-        send_telegram(montar_resumo(state, agora), parse_mode="HTML")
+        send_telegram(montar_resumo(state, agora), parse_mode="HTML", silencioso=True)
         reiniciar_resumo(state, agora)
         print("Resumo enviado.")
 

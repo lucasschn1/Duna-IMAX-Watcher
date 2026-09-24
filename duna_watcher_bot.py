@@ -97,24 +97,36 @@ def montar_status() -> str:
     if fontes:
         linhas += ["", "<b>FONTES</b>", *fontes]
 
-    linhas += ["", f"<b>🎬 SESSÕES CONHECIDAS ({len(state.get('sessoes_vistas', []))})</b>"]
     atuais = state.get("sessoes_atuais")
     if atuais:
+        linhas += ["", f"<b>🎬 SESSÕES À VENDA ({len(atuais)})</b>"]
         por_data: dict[str, list[dict]] = {}
         for s in atuais:
             por_data.setdefault(s["data"], []).append(s)
-        for data in sorted(por_data, key=lambda d: d.split("/")[::-1]):
+        for data in sorted(por_data, key=watcher.chave_data):
             horarios = " · ".join(
                 f'<a href="{esc(s["link"], quote=True)}">{esc(s["hora"])}</a> '
                 f'{esc("/".join(t[:3] for t in s["tags"] if t.upper() != "IMAX").upper())}'
                 if s.get("link") else esc(s["hora"])
                 for s in sorted(por_data[data], key=lambda s: s["hora"])
             )
-            linhas.append(f"  🗓 {esc(data)}: {horarios}")
+            linhas.append(f"  🗓 {esc(watcher.rotulo_data(data, com_ano=False))}: {horarios}")
+        precos = sorted({s["preco"] for s in atuais if s.get("preco")})
+        if precos:
+            faixa = watcher.formatar_preco(precos[0])
+            if len(precos) > 1:
+                faixa += f" A {watcher.formatar_preco(precos[-1])}"
+            linhas.append(f"  💰 {faixa}")
     elif not state.get("sessoes_vistas"):
-        linhas.append("  NENHUMA AINDA.")
+        linhas += ["", "<b>🎬 SESSÕES À VENDA</b>", "  NENHUMA AINDA."]
     else:
-        linhas.append("  (DETALHES DISPONÍVEIS APÓS A PRÓXIMA CHECAGEM)")
+        linhas += ["", "<b>🎬 SESSÕES À VENDA</b>", "  (DETALHES DISPONÍVEIS APÓS A PRÓXIMA CHECAGEM)"]
+
+    removidas = [r["info"] for r in (state.get("ausentes") or {}).values() if r.get("avisado")]
+    if removidas:
+        linhas += ["", f"<b>🟠 REMOVIDAS ({len(removidas)})</b>"]
+        for s in sorted(removidas, key=lambda s: (watcher.chave_data(s["data"]), s["hora"])):
+            linhas.append(f"  🗓 {esc(watcher.rotulo_data(s['data'], com_ano=False))} {esc(s['hora'])}")
     return "\n".join(linhas)
 
 
