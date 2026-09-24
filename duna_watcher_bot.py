@@ -51,8 +51,8 @@ def salvar_offset(offset: int) -> None:
 def montar_status() -> str:
     """Snapshot do watcher com um semáforo no topo, que aqui indica a saúde
     do monitoramento (não se achou sessão): 🟢 tudo ok, 🟡 alguma fonte com
-    problema, 🔴 watcher parado (sem execução recente) ou todas as fontes
-    com problema."""
+    problema (canário ou pausada por bloqueio), 🔴 watcher parado (sem
+    execução recente) ou todas as fontes com problema."""
     state = watcher.load_state()
     agora = datetime.now(timezone.utc)
     esc = watcher.html.escape
@@ -61,10 +61,11 @@ def montar_status() -> str:
     ultima_dt = datetime.fromisoformat(ultima_execucao) if ultima_execucao else None
     parado = ultima_dt is None or agora - ultima_dt > ATRASO_MAXIMO
 
-    fontes_monitoradas = list(state.get("contagem_por_fonte") or {})
-    alertas = [f for f, ativo in (state.get("canario_alertado") or {}).items() if ativo]
+    alertas = {f for f, ativo in (state.get("canario_alertado") or {}).items() if ativo}
+    alertas |= watcher.fontes_pausadas(state, agora)
+    fontes_monitoradas = set(state.get("contagem_por_fonte") or {}) | alertas
 
-    if parado or (fontes_monitoradas and len(alertas) >= len(fontes_monitoradas)):
+    if parado or (fontes_monitoradas and fontes_monitoradas <= alertas):
         semaforo, situacao = "🔴", "ATENÇÃO"
     elif alertas:
         semaforo, situacao = "🟡", "FUNCIONANDO COM FALHAS"

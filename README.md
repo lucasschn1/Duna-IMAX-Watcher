@@ -87,6 +87,12 @@ Env vars que controlam isso:
   Fica desligado por padrão nos dois deploys pra não duplicar.
 - `RESUMO_INTERVALO_DIAS` (padrão `3`): de quantos em quantos dias manda
   esse resumo.
+- `PAUSA_BLOQUEIO_MIN` (padrão `60`): se um site bloquear o acesso (HTTP
+  403/429), a fonte fica pausada por esse tempo em vez de continuar
+  insistindo (o que só prolongaria o bloqueio). A pausa dobra a cada
+  bloqueio seguido, até 6 h, e respeita o `Retry-After` do site. Chega um
+  aviso 🟡 ao pausar e 🟢 quando a fonte volta; as outras fontes seguem
+  monitorando normalmente.
 
 Independente de `HEARTBEAT_ATIVO`/`RESUMO_ATIVO`, todo deploy tem um
 "canário": se uma fonte que antes achava sessão passar a achar 0 de
@@ -135,11 +141,11 @@ E `/etc/systemd/system/duna-watcher.timer`:
 
 ```ini
 [Unit]
-Description=Roda o Duna IMAX Watcher a cada 1 minuto
+Description=Roda o Duna IMAX Watcher a cada 2 minutos
 
 [Timer]
 OnBootSec=30
-OnUnitActiveSec=60
+OnUnitActiveSec=120
 Unit=duna-watcher.service
 
 [Install]

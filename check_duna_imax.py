@@ -86,6 +86,13 @@ RESUMO_INTERVALO = timedelta(days=float(os.environ.get("RESUMO_INTERVALO_DIAS", 
 # comando "problema" do bot.
 MAX_PROBLEMAS = 20
 
+# Pausa automática de uma fonte quando o site bloqueia o acesso (ver
+# aplicar_pausas): começa em PAUSA_BLOQUEIO_MIN e dobra a cada bloqueio
+# seguido, até PAUSA_MAXIMA.
+STATUS_BLOQUEIO = {403, 429}
+PAUSA_BLOQUEIO = timedelta(minutes=float(os.environ.get("PAUSA_BLOQUEIO_MIN", "60")))
+PAUSA_MAXIMA = timedelta(hours=6)
+
 # Horário de Brasília pra exibir nas mensagens (sem horário de verão desde
 # 2019, então um offset fixo basta e evita depender do tzdata no Windows).
 FUSO_BR = timezone(timedelta(hours=-3))
@@ -261,8 +268,9 @@ def buscar_sessoes_imax_palladium() -> list[Sessao]:
     return sessoes
 
 
-def buscar_sessoes() -> ResultadoBusca:
-    """Junta as sessões das fontes ativas nesta máquina (FONTES_ATIVAS).
+def buscar_sessoes(pular: set[str] = frozenset()) -> ResultadoBusca:
+    """Junta as sessões das fontes ativas nesta máquina (FONTES_ATIVAS),
+    exceto as em `pular` (pausadas por bloqueio, ver aplicar_pausas).
 
     Cada fonte é isolada em seu próprio try/except: se uma delas falhar (ex:
     site fora do ar, mudança de estrutura), a outra continua funcionando
@@ -278,6 +286,9 @@ def buscar_sessoes() -> ResultadoBusca:
     }
     for nome, buscar in fontes.items():
         if nome not in FONTES_ATIVAS:
+            continue
+        if nome in pular:
+            print(f"Fonte '{nome}' pausada por bloqueio; pulando.")
             continue
         try:
             encontradas = buscar()
@@ -321,11 +332,17 @@ def provavel_causa(e: Exception) -> str:
 def descrever_excecao(fonte: str, e: Exception) -> dict:
     """Registro de problema a partir de uma exceção capturada. Tem que ser
     chamada dentro do except, pra format_exc() pegar o stack certo."""
+    resposta = getattr(e, "response", None)
+    retry_after = resposta.headers.get("Retry-After", "") if resposta is not None else ""
     return {
         "fonte": fonte,
         "tipo": type(e).__name__,
         "mensagem": str(e)[:500],
         "causa": provavel_causa(e),
+        # Usados por aplicar_pausas() pra detectar bloqueio e respeitar o
+        # tempo de espera pedido pelo site (só o formato em segundos).
+        "status_http": resposta.status_code if resposta is not None else None,
+        "retry_after": int(retry_after) if retry_after.isdigit() else None,
         # O fim do stack é o que interessa (onde estourou); corta o começo
         # pra não inchar o state.json.
         "stack": traceback.format_exc()[-3000:],
@@ -338,6 +355,57 @@ def registrar_problema(state: dict, problema: dict, agora: datetime) -> None:
     problemas = state.setdefault("problemas", [])
     problemas.append({"quando": agora.isoformat(), "origem": ORIGEM, **problema})
     del problemas[:-MAX_PROBLEMAS]
+
+
+def fontes_pausadas(state: dict, agora: datetime) -> set[str]:
+    return {
+        fonte
+        for fonte, ate in (state.get("pausa_ate") or {}).items()
+        if ate and datetime.fromisoformat(ate) > agora
+    }
+
+
+def aplicar_pausas(state: dict, resultado: ResultadoBusca, agora: datetime) -> list[str]:
+    """Pausa a fonte que respondeu com bloqueio (403/429) em vez de continuar
+    insistindo, o que só prolongaria o bloqueio. A pausa dobra a cada
+    bloqueio seguido (PAUSA_BLOQUEIO, 2x, 4x... até PAUSA_MAXIMA) e respeita
+    o Retry-After do site se ele pedir mais. Quando a fonte volta a
+    responder, zera o contador. Retorna os avisos pro Telegram (🟡 ao
+    pausar, 🟢 ao voltar)."""
+    pausa_ate = state.setdefault("pausa_ate", {})
+    seguidos = state.setdefault("bloqueios_seguidos", {})
+    avisos = []
+
+    for problema in resultado.problemas:
+        if problema.get("status_http") not in STATUS_BLOQUEIO:
+            continue
+        fonte = problema["fonte"]
+        seguidos[fonte] = seguidos.get(fonte, 0) + 1
+        duracao = min(PAUSA_BLOQUEIO * 2 ** (seguidos[fonte] - 1), PAUSA_MAXIMA)
+        if problema.get("retry_after"):
+            duracao = max(duracao, timedelta(seconds=problema["retry_after"]))
+        fim = agora + duracao
+        pausa_ate[fonte] = fim.isoformat()
+        minutos = int(duracao.total_seconds() // 60)
+        avisos.append(
+            f"🟡 <b>FONTE {html.escape(NOME_FONTE.get(fonte, fonte).upper())} PAUSADA</b> 🟡\n"
+            f"🚫 O SITE BLOQUEOU O ACESSO (HTTP {problema['status_http']}), "
+            f"{seguidos[fonte]}º BLOQUEIO SEGUIDO.\n"
+            f"⏸ PAUSADA POR {minutos} MIN, ATÉ {formatar_data_hora(fim)} "
+            f"({html.escape(ORIGEM.upper())}).\n"
+            "AS OUTRAS FONTES CONTINUAM MONITORANDO. MANDE <code>problema</code> PRA DETALHES."
+        )
+
+    for fonte in resultado.contagens:  # fontes que responderam sem erro
+        if seguidos.get(fonte):
+            avisos.append(
+                f"🟢 <b>FONTE {html.escape(NOME_FONTE.get(fonte, fonte).upper())} VOLTOU</b> 🟢\n"
+                f"O SITE VOLTOU A RESPONDER NORMALMENTE ({html.escape(ORIGEM.upper())})."
+            )
+        seguidos[fonte] = 0
+        pausa_ate.pop(fonte, None)
+
+    return avisos
 
 
 def checar_canario(state: dict, contagens: dict[str, int]) -> list[str]:
@@ -419,12 +487,19 @@ def formatar_tempo_relativo(dt: datetime, agora: datetime) -> str:
 
 
 def linha_fontes(state: dict) -> list[str]:
-    """Uma linha por fonte com a contagem da última execução e se o canário
-    está disparado pra ela — usado no resumo e no /status do bot."""
+    """Uma linha por fonte com a contagem da última execução, se o canário
+    está disparado pra ela e se está pausada por bloqueio — usado no resumo
+    e no /status do bot."""
     contagens = state.get("contagem_por_fonte") or {}
     alertados = state.get("canario_alertado") or {}
+    pausa_ate = state.get("pausa_ate") or {}
+    pausadas = fontes_pausadas(state, datetime.now(timezone.utc))
     linhas = []
     for fonte, nome in NOME_FONTE.items():
+        if fonte in pausadas:
+            fim = formatar_data_hora(datetime.fromisoformat(pausa_ate[fonte]))
+            linhas.append(f"  ⏸ {html.escape(nome.upper())}: PAUSADA POR BLOQUEIO ATÉ {fim}")
+            continue
         if fonte not in contagens:
             continue
         icone = "⚠️" if alertados.get(fonte) else "✅"
@@ -536,7 +611,7 @@ def main() -> None:
     state["last_run"] = agora.isoformat()
 
     try:
-        resultado = buscar_sessoes()
+        resultado = buscar_sessoes(pular=fontes_pausadas(state, agora))
     except Exception as e:
         print(f"Erro ao checar a página: {e}", file=sys.stderr)
         registrar_problema(state, descrever_excecao("geral", e), agora)
@@ -546,6 +621,10 @@ def main() -> None:
 
     for problema in resultado.problemas:
         registrar_problema(state, problema, agora)
+
+    for aviso in aplicar_pausas(state, resultado, agora):
+        send_telegram(aviso, parse_mode="HTML")
+        print("Aviso de pausa/retomada de fonte enviado.")
 
     novas = [s for s in resultado.sessoes if s.chave not in vistas]
 
