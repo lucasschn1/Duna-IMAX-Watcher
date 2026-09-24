@@ -14,6 +14,8 @@ frente, "?"/"!" no final tanto faz):
              de canário (fonte com problema)
   resumo  -> mesmo texto do resumo periódico, mas sob demanda e sem
              resetar o contador
+  problema -> último erro registrado (data/hora, origem, fonte, causa
+              provável e stack) + lista dos anteriores
 
 Só responde a mensagens vindas do TELEGRAM_CHAT_ID configurado — qualquer
 outro remetente que escreva pro bot é ignorado.
@@ -21,7 +23,7 @@ outro remetente que escreva pro bot é ignorado.
 
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -30,6 +32,9 @@ import check_duna_imax as watcher
 
 OFFSET_FILE = Path(__file__).parent / "bot_offset.txt"
 POLL_TIMEOUT = 30
+
+# Sem checagem há mais que isso, o /status considera o watcher parado (🔴).
+ATRASO_MAXIMO = timedelta(hours=2)
 
 
 def carregar_offset() -> int | None:
@@ -44,46 +49,126 @@ def salvar_offset(offset: int) -> None:
 
 
 def montar_status() -> str:
+    """Snapshot do watcher com um semáforo no topo, que aqui indica a saúde
+    do monitoramento (não se achou sessão): 🟢 tudo ok, 🟡 alguma fonte com
+    problema, 🔴 watcher parado (sem execução recente) ou todas as fontes
+    com problema."""
     state = watcher.load_state()
-    vistas = state.get("sessoes_vistas", [])
+    agora = datetime.now(timezone.utc)
+    esc = watcher.html.escape
 
     ultima_execucao = state.get("last_run")
-    if ultima_execucao:
-        delta = datetime.now(timezone.utc) - datetime.fromisoformat(ultima_execucao)
-        minutos = int(delta.total_seconds() // 60)
-        quando = f"há {minutos} min" if minutos else "agora mesmo"
-    else:
-        quando = "desconhecida"
+    ultima_dt = datetime.fromisoformat(ultima_execucao) if ultima_execucao else None
+    parado = ultima_dt is None or agora - ultima_dt > ATRASO_MAXIMO
 
-    alertas = [
-        watcher.NOME_FONTE.get(fonte, fonte)
-        for fonte, ativo in (state.get("canario_alertado") or {}).items()
-        if ativo
-    ]
+    fontes_monitoradas = list(state.get("contagem_por_fonte") or {})
+    alertas = [f for f, ativo in (state.get("canario_alertado") or {}).items() if ativo]
+
+    if parado or (fontes_monitoradas and len(alertas) >= len(fontes_monitoradas)):
+        semaforo, situacao = "🔴", "ATENÇÃO"
+    elif alertas:
+        semaforo, situacao = "🟡", "FUNCIONANDO COM FALHAS"
+    else:
+        semaforo, situacao = "🟢", "TUDO OK"
 
     linhas = [
-        f"📟 <b>Status</b> ({watcher.html.escape(watcher.ORIGEM)})",
-        f"🎬 {len(vistas)} sessão(ões) de Duna já vista(s)",
-        f"🕐 Última execução: {quando}",
+        f"{semaforo} <b>STATUS: {situacao}</b> {semaforo}",
+        f"📟 {esc(watcher.ORIGEM.upper())}",
+        "",
     ]
-    if alertas:
-        nomes = ", ".join(watcher.html.escape(a) for a in alertas)
-        linhas.append(f"⚠️ Fonte(s) com problema: {nomes}")
+    if ultima_dt:
+        aviso = " ⚠️ ATRASADA" if parado else ""
+        linhas.append(
+            f"🕐 ÚLTIMA CHECAGEM: {watcher.formatar_tempo_relativo(ultima_dt, agora)} "
+            f"({watcher.formatar_data_hora(ultima_dt)}){aviso}"
+        )
     else:
-        linhas.append("✅ Nenhum problema detectado nas fontes.")
+        linhas.append("🕐 ÚLTIMA CHECAGEM: DESCONHECIDA ⚠️")
+
+    ultima_nova = state.get("ultima_sessao_nova")
+    if ultima_nova:
+        linhas.append(
+            f"🆕 ÚLTIMA SESSÃO NOVA: "
+            f"{watcher.formatar_tempo_relativo(datetime.fromisoformat(ultima_nova), agora)}"
+        )
+
+    fontes = watcher.linha_fontes(state)
+    if fontes:
+        linhas += ["", "<b>FONTES</b>", *fontes]
+
+    linhas += ["", f"<b>🎬 SESSÕES CONHECIDAS ({len(state.get('sessoes_vistas', []))})</b>"]
+    atuais = state.get("sessoes_atuais")
+    if atuais:
+        por_data: dict[str, list[dict]] = {}
+        for s in atuais:
+            por_data.setdefault(s["data"], []).append(s)
+        for data in sorted(por_data, key=lambda d: d.split("/")[::-1]):
+            horarios = " · ".join(
+                f'<a href="{esc(s["link"], quote=True)}">{esc(s["hora"])}</a> '
+                f'{esc("/".join(t[:3] for t in s["tags"] if t.upper() != "IMAX").upper())}'
+                if s.get("link") else esc(s["hora"])
+                for s in sorted(por_data[data], key=lambda s: s["hora"])
+            )
+            linhas.append(f"  🗓 {esc(data)}: {horarios}")
+    elif not state.get("sessoes_vistas"):
+        linhas.append("  NENHUMA AINDA.")
+    else:
+        linhas.append("  (DETALHES DISPONÍVEIS APÓS A PRÓXIMA CHECAGEM)")
     return "\n".join(linhas)
 
 
 def montar_resumo_atual() -> str:
     state = watcher.load_state()
     if not (state.get("resumo") or {}).get("desde"):
-        return "📊 Ainda não há dados de resumo acumulados."
+        return "📊 <b>AINDA NÃO HÁ DADOS DE RESUMO ACUMULADOS.</b>"
     return watcher.montar_resumo(state, datetime.now(timezone.utc))
+
+
+def montar_problema() -> str:
+    """Detalha o problema mais recente (data/hora, origem, fonte, causa
+    provável e stack) e lista os anteriores numa linha cada."""
+    state = watcher.load_state()
+    esc = watcher.html.escape
+    problemas = state.get("problemas") or []
+    if not problemas:
+        return "🟢 <b>NENHUM PROBLEMA REGISTRADO</b> 🟢"
+
+    agora = datetime.now(timezone.utc)
+    ultimo = problemas[-1]
+    quando = datetime.fromisoformat(ultimo["quando"])
+    fonte = watcher.NOME_FONTE.get(ultimo["fonte"], ultimo["fonte"])
+
+    linhas = [
+        "🔴 <b>ÚLTIMO PROBLEMA</b> 🔴",
+        f"🕐 {watcher.formatar_data_hora(quando)} ({watcher.formatar_tempo_relativo(quando, agora)})",
+        f"📟 ORIGEM: {esc(ultimo.get('origem', '?').upper())}",
+        f"🌐 FONTE: {esc(fonte.upper())}",
+        f"🧩 ERRO: <code>{esc(ultimo['tipo'])}</code>: {esc(ultimo['mensagem'])}",
+        "",
+        f"💡 <b>PROVÁVEL CAUSA:</b> {esc(ultimo['causa'])}",
+    ]
+    if ultimo.get("stack"):
+        # Limite do Telegram é 4096 caracteres por mensagem; o fim do stack
+        # (onde estourou) é o que importa.
+        linhas += ["", "<b>STACK</b>", f"<pre>{esc(ultimo['stack'][-2500:])}</pre>"]
+
+    anteriores = problemas[-6:-1]
+    if anteriores:
+        linhas += ["", f"<b>ANTERIORES ({len(problemas) - 1} NO TOTAL)</b>"]
+        for p in reversed(anteriores):
+            nome = watcher.NOME_FONTE.get(p["fonte"], p["fonte"])
+            linhas.append(
+                f"  • {watcher.formatar_data_hora(datetime.fromisoformat(p['quando']))} · "
+                f"{esc(nome.upper())} · {esc(p['tipo'])}"
+            )
+    return "\n".join(linhas)
 
 
 COMANDOS = {
     "status": montar_status,
     "resumo": montar_resumo_atual,
+    "problema": montar_problema,
+    "problemas": montar_problema,
 }
 
 

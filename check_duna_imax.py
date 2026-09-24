@@ -3,18 +3,14 @@ Verifica se há novas sessões de "Duna - Parte 3" no IMAX Shopping Palladium
 (Curitiba) e notifica no Telegram quando encontrar novidade.
 
 Monitora duas fontes independentes, para não depender de uma só:
-- ingresso.com: página de sessões do cinema (lista todos os filmes em
-  cartaz). É renderizada via JS, então usamos Playwright para essa parte.
+- ingresso.com: API JSON (api-content.ingresso.com) que o próprio site usa
+  pra montar a página do cinema, consultada data a data.
 - imaxpalladium.com.br: página do próprio cinema dedicada a este filme.
-  É HTML estático, então usamos só requests + BeautifulSoup, sem navegador.
+  É HTML estático, então usamos só requests + BeautifulSoup.
 
-Dá pra rodar só uma parte das fontes via a env var FONTES_ATIVAS (lista
-separada por vírgula, ex: "imax_palladium"). Isso existe porque essa fonte
-é bem mais leve que a do ingresso.com/Playwright — dá pra rodar num servidor
-fraco (pouca RAM, HD) com bastante frequência, deixando a fonte pesada só
-no GitHub Actions. O import do Playwright é adiado (só acontece se a fonte
-"ingresso" estiver ativa), pra essa máquina leve nem precisar ter o pacote
-instalado.
+Nenhuma das duas precisa de navegador. Dá pra rodar só uma parte das fontes
+via a env var FONTES_ATIVAS (lista separada por vírgula, ex:
+"imax_palladium").
 
 O estado (sessões já vistas) fica em state.json. No GitHub Actions, o
 workflow commita esse arquivo de volta no repo; num deploy local (ex: um
@@ -27,6 +23,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,13 +31,14 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-URL_INGRESSO = "https://www.ingresso.com/cinema/imax-shopping-palladium/sessoes?city=curitiba"
+URL_INGRESSO = "https://www.ingresso.com/cinema/imax-shopping-palladium?city=curitiba"
+# API que a página acima chama por baixo (city 18 = Curitiba, theater 795 =
+# IMAX Shopping Palladium). Ids obtidos observando as requisições da página.
+API_INGRESSO = "https://api-content.ingresso.com/v0/sessions/city/18/theater/795"
 URL_IMAX_PALLADIUM = "https://imaxpalladium.com.br/filmes/duna-parte-3/"
 STATE_FILE = Path(__file__).parent / "state.json"
 
-# Quais fontes rodar nesta máquina. Por padrão as duas; um deploy leve (ex:
-# servidor com pouca RAM) pode setar FONTES_ATIVAS=imax_palladium pra pular
-# o Playwright/Chromium por completo.
+# Quais fontes rodar nesta máquina. Por padrão as duas.
 FONTES_ATIVAS = {
     f.strip() for f in os.environ.get("FONTES_ATIVAS", "ingresso,imax_palladium").split(",") if f.strip()
 }
@@ -84,6 +82,14 @@ HEARTBEAT_INTERVAL = timedelta(hours=1)
 RESUMO_ATIVO = os.environ.get("RESUMO_ATIVO", "0") != "0"
 RESUMO_INTERVALO = timedelta(days=float(os.environ.get("RESUMO_INTERVALO_DIAS", "3")))
 
+# Quantos problemas (erros de fonte, canário) ficam guardados no state pro
+# comando "problema" do bot.
+MAX_PROBLEMAS = 20
+
+# Horário de Brasília pra exibir nas mensagens (sem horário de verão desde
+# 2019, então um offset fixo basta e evita depender do tzdata no Windows).
+FUSO_BR = timezone(timedelta(hours=-3))
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -115,6 +121,9 @@ class ResultadoBusca:
     sessoes: list[Sessao] = field(default_factory=list)
     contagens: dict[str, int] = field(default_factory=dict)
     erros: dict[str, str] = field(default_factory=dict)
+    # Um registro por erro (causa provável + stack), pro comando "problema"
+    # do bot. Ver descrever_excecao().
+    problemas: list[dict] = field(default_factory=list)
 
 
 def load_state() -> dict:
@@ -158,27 +167,6 @@ def send_telegram(mensagem: str, parse_mode: str | None = None) -> None:
     resp.raise_for_status()
 
 
-def extrair_screening_events(page) -> list[dict]:
-    """Lê os blocos <script type="application/ld+json"> da página e retorna
-    os objetos ScreeningEvent (schema.org) do @graph.
-
-    O ingresso.com usa Tailwind puro: não há nenhuma classe ou data-testid
-    com "session"/"sessao" no HTML, então um seletor CSS não tem como achar
-    as sessões. O JSON-LD é dado estruturado pensado para SEO/Google, então
-    é uma fonte muito mais estável.
-    """
-    eventos: list[dict] = []
-    for script in page.query_selector_all("script[type='application/ld+json']"):
-        try:
-            data = json.loads(script.inner_text())
-        except json.JSONDecodeError:
-            continue
-        for item in data.get("@graph", []):
-            if item.get("@type") == "ScreeningEvent":
-                eventos.append(item)
-    return eventos
-
-
 def extrair_session_id(link: str) -> str | None:
     """Extrai o sessionId do link de checkout.ingresso.com.
 
@@ -192,48 +180,52 @@ def extrair_session_id(link: str) -> str | None:
 
 
 def buscar_sessoes_ingresso() -> list[Sessao]:
-    """Abre a página de sessões do cinema no ingresso.com (via Playwright) e
-    extrai as sessões de Duna - Parte 3.
+    """Busca as sessões de Duna - Parte 3 na API do ingresso.com.
 
-    A página lista TODOS os filmes em cartaz, então filtramos pelo título do
-    filme.
+    A página do cinema no site só embute (no JSON-LD) as sessões do dia
+    atual; as outras datas são carregadas sob demanda por esta API quando o
+    usuário clica no seletor de data. Então consultamos a lista de datas
+    com sessão e, pra cada uma, as sessões do dia. A resposta lista todos
+    os filmes do cinema, então filtramos pelo título.
     """
-    from playwright.sync_api import sync_playwright
+    resp = requests.get(f"{API_INGRESSO}/dates/partnership/home", headers=HTTP_HEADERS, timeout=15)
+    resp.raise_for_status()
+    datas = [d["date"] for d in resp.json() if d.get("date")]
 
     sessoes: list[Sessao] = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
-        page.goto(URL_INGRESSO, timeout=30000)
-
-        # Espera o conteúdo dinâmico carregar
-        page.wait_for_timeout(4000)
-
-        for evento in extrair_screening_events(page):
-            titulo = (evento.get("workPerformed") or {}).get("name", "")
-            if TITULO_FILME not in titulo.lower():
-                continue
-            inicio = evento.get("startDate", "")
-            formato = evento.get("name", "")
-            link = (evento.get("offers") or {}).get("url", "")
-
-            try:
-                dt = datetime.fromisoformat(inicio)
-                data, hora = dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M")
-            except ValueError:
-                data, hora = inicio, ""
-
-            # "Duna - Parte 3 – IMAX, Dublado" -> ["IMAX", "Dublado"]
-            partes = re.split(r"[–-]", formato)
-            tags = [p.strip() for p in partes[-1].split(",")] if len(partes) > 1 else []
-
-            chave = extrair_session_id(link) or f"{inicio}|{formato}|{link}"
-            sessoes.append(
-                Sessao(chave=chave, fonte="Ingresso.com", data=data, hora=hora, link=link, tags=tags)
-            )
-
-        browser.close()
+    for data_iso in datas:
+        resp = requests.get(
+            f"{API_INGRESSO}/partnership/home/groupBy/sessionType",
+            params={"date": data_iso},
+            headers=HTTP_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for dia in resp.json():
+            for filme in dia.get("movies", []):
+                if TITULO_FILME not in (filme.get("title") or "").lower():
+                    continue
+                for tipo in filme.get("sessionTypes", []):
+                    for s in tipo.get("sessions", []):
+                        inicio = (s.get("date") or {}).get("localDate", "")
+                        try:
+                            dt = datetime.fromisoformat(inicio)
+                            data, hora = dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M")
+                        except ValueError:
+                            data, hora = data_iso, s.get("time", "")
+                        link = s.get("siteURL", "")
+                        chave = str(s.get("id") or extrair_session_id(link) or f"{inicio}|{link}")
+                        sessoes.append(
+                            Sessao(
+                                chave=chave,
+                                fonte="Ingresso.com",
+                                data=data,
+                                hora=hora,
+                                link=link,
+                                sala=s.get("room") or "",
+                                tags=list(s.get("type") or []),
+                            )
+                        )
 
     return sessoes
 
@@ -292,6 +284,7 @@ def buscar_sessoes() -> ResultadoBusca:
         except Exception as e:
             print(f"Erro ao checar fonte '{nome}': {e}", file=sys.stderr)
             resultado.erros[nome] = str(e)
+            resultado.problemas.append(descrever_excecao(nome, e))
             continue
 
         resultado.contagens[nome] = len(encontradas)
@@ -302,6 +295,49 @@ def buscar_sessoes() -> ResultadoBusca:
             resultado.sessoes.append(sessao)
 
     return resultado
+
+
+def provavel_causa(e: Exception) -> str:
+    """Traduz a exceção numa causa provável legível, pra não precisar ler o
+    stack pra ter uma ideia do que aconteceu."""
+    if isinstance(e, requests.Timeout):
+        return "O site demorou demais pra responder (lento ou sobrecarregado)."
+    if isinstance(e, requests.ConnectionError):
+        return "Não conseguiu conectar no site (fora do ar, DNS ou sem internet na máquina)."
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        status = e.response.status_code
+        if status in (401, 403, 429):
+            return f"O site recusou o acesso (HTTP {status}): provável bloqueio anti-robô ou excesso de requisições."
+        if status == 404:
+            return "Página/endereço não encontrado (HTTP 404): a URL provavelmente mudou."
+        if status >= 500:
+            return f"Erro interno do site (HTTP {status}): instabilidade do lado deles."
+        return f"O site respondeu com erro HTTP {status}."
+    if isinstance(e, (json.JSONDecodeError, KeyError, TypeError, AttributeError, IndexError)):
+        return "A resposta veio num formato inesperado: o site/API provavelmente mudou de estrutura."
+    return "Erro inesperado: veja o stack abaixo."
+
+
+def descrever_excecao(fonte: str, e: Exception) -> dict:
+    """Registro de problema a partir de uma exceção capturada. Tem que ser
+    chamada dentro do except, pra format_exc() pegar o stack certo."""
+    return {
+        "fonte": fonte,
+        "tipo": type(e).__name__,
+        "mensagem": str(e)[:500],
+        "causa": provavel_causa(e),
+        # O fim do stack é o que interessa (onde estourou); corta o começo
+        # pra não inchar o state.json.
+        "stack": traceback.format_exc()[-3000:],
+    }
+
+
+def registrar_problema(state: dict, problema: dict, agora: datetime) -> None:
+    """Guarda o problema (com data/hora e origem) no state, mantendo só os
+    MAX_PROBLEMAS mais recentes. Lido pelo comando "problema" do bot."""
+    problemas = state.setdefault("problemas", [])
+    problemas.append({"quando": agora.isoformat(), "origem": ORIGEM, **problema})
+    del problemas[:-MAX_PROBLEMAS]
 
 
 def checar_canario(state: dict, contagens: dict[str, int]) -> list[str]:
@@ -326,6 +362,18 @@ def checar_canario(state: dict, contagens: dict[str, int]) -> list[str]:
                 "o site fora do ar ou uma mudança de estrutura — vale checar manualmente."
             )
             alertados[fonte] = True
+            registrar_problema(
+                state,
+                {
+                    "fonte": fonte,
+                    "tipo": "Canário",
+                    "mensagem": f"Achava {anterior} sessão(ões) e passou a achar 0 (sem exceção).",
+                    "causa": "O parser rodou sem erro mas não achou nada: provável mudança de "
+                    "estrutura do site, ou as sessões foram retiradas.",
+                    "stack": "",
+                },
+                datetime.now(timezone.utc),
+            )
         elif atual > 0:
             alertados[fonte] = False
         anteriores[fonte] = atual
@@ -353,7 +401,40 @@ def resumo_devido(state: dict) -> bool:
     return datetime.now(timezone.utc) - datetime.fromisoformat(desde) >= RESUMO_INTERVALO
 
 
+def formatar_data_hora(dt: datetime) -> str:
+    """dd/mm HH:MM no horário de Brasília (os timestamps do state são UTC)."""
+    return dt.astimezone(FUSO_BR).strftime("%d/%m %H:%M")
+
+
+def formatar_tempo_relativo(dt: datetime, agora: datetime) -> str:
+    """"HÁ 12 MIN", "HÁ 3 H", "HÁ 2 DIAS" — pra leitura rápida no celular."""
+    minutos = int((agora - dt).total_seconds() // 60)
+    if minutos < 1:
+        return "AGORA MESMO"
+    if minutos < 60:
+        return f"HÁ {minutos} MIN"
+    if minutos < 48 * 60:
+        return f"HÁ {minutos // 60} H"
+    return f"HÁ {minutos // (24 * 60)} DIAS"
+
+
+def linha_fontes(state: dict) -> list[str]:
+    """Uma linha por fonte com a contagem da última execução e se o canário
+    está disparado pra ela — usado no resumo e no /status do bot."""
+    contagens = state.get("contagem_por_fonte") or {}
+    alertados = state.get("canario_alertado") or {}
+    linhas = []
+    for fonte, nome in NOME_FONTE.items():
+        if fonte not in contagens:
+            continue
+        icone = "⚠️" if alertados.get(fonte) else "✅"
+        linhas.append(f"  {icone} {html.escape(nome.upper())}: {contagens[fonte]} SESSÃO(ÕES)")
+    return linhas
+
+
 def montar_resumo(state: dict, agora: datetime) -> str:
+    """Resumo do período: 🟢 se apareceu sessão nova, 🔴 se não — mesma
+    convenção das notificações de sessão —, com ⚠️ à parte pros erros."""
     resumo = state.get("resumo", {})
     desde_dt = datetime.fromisoformat(resumo["desde"])
     dias = max(1, round((agora - desde_dt).total_seconds() / 86400))
@@ -362,17 +443,26 @@ def montar_resumo(state: dict, agora: datetime) -> str:
     erros_por_fonte = resumo.get("erros_por_fonte", {})
     total_erros = sum(erros_por_fonte.values())
 
+    cor = "🟢" if sessoes_novas else "🔴"
     linhas = [
-        f"📊 <b>Resumo dos últimos {dias} dia(s)</b> ({html.escape(ORIGEM)})",
-        f"✅ {execucoes} checagem(ns) · 🎬 {sessoes_novas} sessão(ões) nova(s)",
+        f"{cor} <b>RESUMO DOS ÚLTIMOS {dias} DIA(S)</b> {cor}",
+        f"📊 {html.escape(ORIGEM.upper())} · {formatar_data_hora(desde_dt)} → {formatar_data_hora(agora)}",
+        "",
+        f"🔁 {execucoes} CHECAGEM(NS)",
+        f"🎬 {sessoes_novas} SESSÃO(ÕES) NOVA(S) · {len(state.get('sessoes_vistas', []))} CONHECIDA(S) NO TOTAL",
     ]
     if total_erros:
         detalhes = ", ".join(
-            f"{html.escape(NOME_FONTE.get(f, f))}: {n}" for f, n in erros_por_fonte.items() if n
+            f"{html.escape(NOME_FONTE.get(f, f).upper())}: {n}" for f, n in erros_por_fonte.items() if n
         )
-        linhas.append(f"⚠️ {total_erros} erro(s) — {detalhes}")
+        taxa = f" ({total_erros * 100 // execucoes}% DAS CHECAGENS)" if execucoes else ""
+        linhas.append(f"⚠️ {total_erros} ERRO(S){taxa} — {detalhes}")
     else:
-        linhas.append("Sem erros no período.")
+        linhas.append("✅ SEM ERROS NO PERÍODO")
+
+    fontes = linha_fontes(state)
+    if fontes:
+        linhas += ["", "<b>FONTES (ÚLTIMA CHECAGEM)</b>", *fontes]
     return "\n".join(linhas)
 
 
@@ -387,7 +477,11 @@ def reiniciar_resumo(state: dict, agora: datetime) -> None:
 
 def montar_mensagem_novas(novas: list[Sessao]) -> str:
     """Monta a mensagem HTML de "sessão nova", agrupada por data e ordenada
-    por horário, com um link "Comprar" por sessão em vez do link cru."""
+    por horário, com um link "Comprar" por sessão em vez do link cru.
+
+    Tudo em maiúsculas e com 🟢 (o Telegram não permite colorir texto), pra
+    diferenciar de relance do aviso de "nada encontrado" (🔴). Só o texto
+    visível vai pra maiúsculas — as URLs dos links ficam intactas."""
     por_data: dict[str, list[Sessao]] = {}
     for s in novas:
         por_data.setdefault(s.data, []).append(s)
@@ -399,23 +493,37 @@ def montar_mensagem_novas(novas: list[Sessao]) -> str:
             return datetime.max
 
     linhas = [
-        "🎬 <b>Nova sessão: Duna - Parte 3</b>",
-        f"📍 IMAX Palladium (Curitiba) · via <i>{html.escape(ORIGEM)}</i>",
+        "🟢🟢🟢 <b>NOVA SESSÃO: DUNA - PARTE 3</b> 🟢🟢🟢",
+        f"📍 IMAX PALLADIUM (CURITIBA) · VIA <i>{html.escape(ORIGEM.upper())}</i>",
         "",
     ]
     for data in sorted(por_data, key=chave_ordenacao):
         linhas.append(f"🗓 <b>{html.escape(data)}</b>")
         for s in sorted(por_data[data], key=lambda s: s.hora):
-            detalhes = html.escape(" · ".join(filter(None, [s.sala, *s.tags])))
-            link_html = f'<a href="{html.escape(s.link, quote=True)}">Comprar</a>' if s.link else ""
+            detalhes = html.escape(" · ".join(filter(None, [s.sala, *s.tags])).upper())
+            link_html = f'<a href="{html.escape(s.link, quote=True)}">COMPRAR</a>' if s.link else ""
             linhas.append(f"  🕐 {html.escape(s.hora)} · {detalhes} — {link_html}")
         linhas.append("")
 
     linhas.append(
-        f'🔗 <a href="{html.escape(URL_INGRESSO, quote=True)}">Ingresso.com</a> · '
-        f'<a href="{html.escape(URL_IMAX_PALLADIUM, quote=True)}">IMAX Palladium</a>'
+        f'🔗 <a href="{html.escape(URL_INGRESSO, quote=True)}">INGRESSO.COM</a> · '
+        f'<a href="{html.escape(URL_IMAX_PALLADIUM, quote=True)}">IMAX PALLADIUM</a>'
     )
     return "\n".join(linhas)
+
+
+def montar_mensagem_sem_novidade() -> str:
+    """Heartbeat de "continuo monitorando, nada encontrado": contraparte 🔴
+    da mensagem de sessão nova (🟢), também toda em maiúsculas."""
+    fontes_label = ", ".join(
+        NOME_FONTE[f] for f in ("ingresso", "imax_palladium") if f in FONTES_ATIVAS
+    )
+    return (
+        "🔴 <b>NENHUMA SESSÃO NOVA</b> 🔴\n"
+        f"🔎 DUNA IMAX WATCHER ({html.escape(ORIGEM.upper())})\n"
+        f"MONITORANDO IMAX PALLADIUM (CURITIBA) VIA {html.escape(fontes_label.upper())}.\n"
+        "NENHUMA SESSÃO NOVA DE DUNA - PARTE 3 ATÉ AGORA."
+    )
 
 
 def main() -> None:
@@ -431,8 +539,13 @@ def main() -> None:
         resultado = buscar_sessoes()
     except Exception as e:
         print(f"Erro ao checar a página: {e}", file=sys.stderr)
+        registrar_problema(state, descrever_excecao("geral", e), agora)
+        save_state(state)
         # Não falha o workflow por instabilidade pontual do site
         sys.exit(0)
+
+    for problema in resultado.problemas:
+        registrar_problema(state, problema, agora)
 
     novas = [s for s in resultado.sessoes if s.chave not in vistas]
 
@@ -442,7 +555,17 @@ def main() -> None:
 
     atualizar_resumo(state, sessoes_novas=len(novas), erros=resultado.erros, agora=agora)
 
+    # Detalhes das sessões atuais, só pro /status do bot poder listá-las
+    # (sessoes_vistas guarda só os ids). Não sobrescreve se todas as fontes
+    # falharam, pra não apagar a lista por causa de instabilidade.
+    if resultado.contagens:
+        state["sessoes_atuais"] = [
+            {"data": s.data, "hora": s.hora, "sala": s.sala, "tags": s.tags, "link": s.link}
+            for s in resultado.sessoes
+        ]
+
     if novas:
+        state["ultima_sessao_nova"] = agora.isoformat()
         send_telegram(montar_mensagem_novas(novas), parse_mode="HTML")
         print(f"Notificação enviada: {len(novas)} sessão(ões) nova(s).")
 
@@ -454,15 +577,7 @@ def main() -> None:
         if not HEARTBEAT_ATIVO:
             print("Heartbeat desativado nesta máquina (HEARTBEAT_ATIVO=0).")
         elif heartbeat_devido(state):
-            fontes_label = ", ".join(
-                NOME_FONTE[f] for f in ("ingresso", "imax_palladium") if f in FONTES_ATIVAS
-            )
-            send_telegram(
-                f"🔎 <b>Duna IMAX Watcher</b> ({html.escape(ORIGEM)})\n"
-                f"Monitorando IMAX Palladium (Curitiba) via {html.escape(fontes_label)}.\n"
-                "Nenhuma sessão de Duna - Parte 3 até agora.",
-                parse_mode="HTML",
-            )
+            send_telegram(montar_mensagem_sem_novidade(), parse_mode="HTML")
             state["last_heartbeat"] = agora.isoformat()
             print("Heartbeat enviado.")
         else:

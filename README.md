@@ -42,19 +42,16 @@ esse tipo de publicação que o watcher detecta.
 
 `buscar_sessoes()` (`check_duna_imax.py`) combina duas fontes:
 
-- **ingresso.com** (`buscar_sessoes_ingresso`): a página de sessões do
-  cinema usa Tailwind puro, sem nenhuma classe ou `data-testid` com
-  "session"/"sessao" — um seletor CSS nunca encontraria nada ali. Em vez
-  disso, lemos o bloco `<script type="application/ld+json">` que a página
-  já embute (dados schema.org `ScreeningEvent`, usados para SEO/Google) e
-  filtramos pelo título do filme (`TITULO_FILME = "duna"`), já que essa
-  página lista todos os filmes em cartaz, não só Duna. Como essa página
-  precisa de JavaScript pra renderizar, usamos Playwright (Chromium
-  headless) aqui.
+- **ingresso.com** (`buscar_sessoes_ingresso`): consulta a API JSON
+  (`api-content.ingresso.com`) que a própria página do cinema usa. A página
+  em si só embute as sessões do dia atual (no JSON-LD), e as outras datas
+  são carregadas sob demanda — por isso lemos primeiro a lista de datas com
+  sessão e depois as sessões de cada data, filtrando pelo título do filme
+  (`TITULO_FILME = "duna"`), já que a resposta traz todos os filmes do
+  cinema. Só `requests`, sem navegador.
 - **imaxpalladium.com.br** (`buscar_sessoes_imax_palladium`): página do
   próprio cinema dedicada a este filme. É HTML estático (renderizado no
-  servidor), então basta `requests` + BeautifulSoup, sem navegador — mais
-  rápido e mais robusto que a fonte acima.
+  servidor), então basta `requests` + BeautifulSoup.
 
 As duas fontes linkam pro mesmo `checkout.ingresso.com/?sessionId=...`, e é
 esse `sessionId` (extraído em `extrair_session_id`) que usamos como chave
@@ -67,17 +64,14 @@ ar, mudança de estrutura), a outra continua funcionando normalmente.
 O `schedule` do GitHub Actions é "melhor esforço": pode atrasar horas em
 período de alta carga, especialmente porque o cron deste repo dispara em
 `:00`/`:30` de cada hora, quando todo mundo dispara junto. Se você tem uma
-máquina ligada 24h, dá pra rodar a fonte `imax_palladium` nela com muito
-mais frequência (ela é só `requests` + BeautifulSoup, sem navegador — leve
-o suficiente pra qualquer hardware) e deixar o GitHub Actions só como
-backup redundante (com as duas fontes, incluindo a pesada via Playwright).
+máquina ligada 24h, dá pra rodar o watcher nela com muito mais frequência
+(as duas fontes são só `requests`, sem navegador — leve o suficiente pra
+qualquer hardware) e deixar o GitHub Actions só como backup redundante.
 
 Env vars que controlam isso:
 
 - `FONTES_ATIVAS` (padrão `ingresso,imax_palladium`): lista separada por
-  vírgula de quais fontes rodar. Um deploy leve usa só `imax_palladium` —
-  o `import` do Playwright só acontece se `ingresso` estiver na lista, então
-  essa máquina nem precisa ter o pacote instalado.
+  vírgula de quais fontes rodar (ex: só `imax_palladium`).
 - `HEARTBEAT_ATIVO` (padrão `1`): `0` desliga o aviso periódico de "continuo
   monitorando" nesta máquina, pra não duplicar esse aviso com o do GitHub
   Actions.
