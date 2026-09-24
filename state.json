@@ -7,21 +7,106 @@
     "86895996",
     "86896003"
   ],
-  "last_heartbeat": "2026-09-24T11:44:33.398779+00:00",
-  "last_run": "2026-09-24T11:44:33.398779+00:00",
+  "last_heartbeat": "2026-09-24T17:05:13.346634+00:00",
+  "last_run": "2026-09-24T17:05:13.346634+00:00",
   "contagem_por_fonte": {
-    "ingresso": 0,
+    "ingresso": 6,
     "imax_palladium": 6
   },
   "canario_alertado": {
-    "imax_palladium": false
+    "imax_palladium": false,
+    "ingresso": false
   },
   "resumo": {
     "desde": "2026-09-16T21:14:49.015389+00:00",
-    "execucoes": 47,
+    "execucoes": 48,
     "sessoes_novas": 0,
     "erros_por_fonte": {
       "ingresso": 1
     }
-  }
+  },
+  "pausa_ate": {},
+  "bloqueios_seguidos": {
+    "ingresso": 0,
+    "imax_palladium": 0
+  },
+  "ausentes": {},
+  "datas_conhecidas": [
+    "15/12/2026",
+    "16/12/2026"
+  ],
+  "sessoes_atuais": [
+    {
+      "chave": "86895710",
+      "data": "15/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=86895710&partnership=home",
+      "preco": 47.76
+    },
+    {
+      "chave": "86895944",
+      "data": "15/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=86895944&partnership=home",
+      "preco": 47.76
+    },
+    {
+      "chave": "86896003",
+      "data": "15/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=86896003&partnership=home",
+      "preco": 47.76
+    },
+    {
+      "chave": "86895938",
+      "data": "16/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=86895938&partnership=home",
+      "preco": 47.76
+    },
+    {
+      "chave": "86895996",
+      "data": "16/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=86895996&partnership=home",
+      "preco": 47.76
+    },
+    {
+      "chave": "86895918",
+      "data": "16/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=86895918&partnership=home",
+      "preco": 47.76
+    }
+  ]
 }
