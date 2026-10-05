@@ -7,8 +7,8 @@
     "86895996",
     "86896003"
   ],
-  "last_heartbeat": "2026-10-05T01:14:32.838332+00:00",
-  "last_run": "2026-10-05T01:14:32.838332+00:00",
+  "last_heartbeat": "2026-10-05T07:39:31.804513+00:00",
+  "last_run": "2026-10-05T07:39:31.804513+00:00",
   "contagem_por_fonte": {
     "ingresso": 6,
     "imax_palladium": 6
@@ -19,16 +19,19 @@
   },
   "resumo": {
     "desde": "2026-09-16T21:14:49.015389+00:00",
-    "execucoes": 101,
+    "execucoes": 102,
     "sessoes_novas": 0,
     "erros_por_fonte": {
-      "ingresso": 1
+      "ingresso": 1,
+      "imax_palladium": 1
     }
   },
-  "pausa_ate": {},
+  "pausa_ate": {
+    "imax_palladium": "2026-10-05T08:39:31.804513+00:00"
+  },
   "bloqueios_seguidos": {
     "ingresso": 0,
-    "imax_palladium": 0
+    "imax_palladium": 1
   },
   "ausentes": {},
   "datas_conhecidas": [
@@ -107,6 +110,19 @@
       ],
       "link": "https://checkout.ingresso.com/?sessionId=86895918&partnership=home",
       "preco": 47.76
+    }
+  ],
+  "problemas": [
+    {
+      "quando": "2026-10-05T07:39:31.804513+00:00",
+      "origem": "GitHub Actions",
+      "fonte": "imax_palladium",
+      "tipo": "HTTPError",
+      "mensagem": "403 Client Error: Forbidden for url: https://imaxpalladium.com.br/filmes/duna-parte-3/",
+      "causa": "O site recusou o acesso (HTTP 403): provável bloqueio anti-robô ou excesso de requisições.",
+      "status_http": 403,
+      "retry_after": null,
+      "stack": "Traceback (most recent call last):\n  File \"/home/runner/work/Duna-IMAX-Watcher/Duna-IMAX-Watcher/check_duna_imax.py\", line 327, in buscar_sessoes\n    encontradas = buscar()\n                  ^^^^^^^^\n  File \"/home/runner/work/Duna-IMAX-Watcher/Duna-IMAX-Watcher/check_duna_imax.py\", line 281, in buscar_sessoes_imax_palladium\n    resp.raise_for_status()\n  File \"/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/requests/models.py\", line 1024, in raise_for_status\n    raise HTTPError(http_error_msg, response=self)\nrequests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://imaxpalladium.com.br/filmes/duna-parte-3/\n"
     }
   ]
 }
