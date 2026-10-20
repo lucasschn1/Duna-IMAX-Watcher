@@ -5,12 +5,33 @@
     "86895938",
     "86895944",
     "86895996",
-    "86896003"
+    "86896003",
+    "87416437",
+    "87416439",
+    "87416443",
+    "87416444",
+    "87416446",
+    "87416449",
+    "87416450",
+    "87416455",
+    "87416456",
+    "87416457",
+    "87416458",
+    "87416459",
+    "87416460",
+    "87416462",
+    "87416464",
+    "87416466",
+    "87416468",
+    "87416471",
+    "87416472",
+    "87416473",
+    "87416478"
   ],
-  "last_heartbeat": "2026-10-20T01:13:58.329172+00:00",
-  "last_run": "2026-10-20T01:13:58.329172+00:00",
+  "last_heartbeat": "2026-10-20T06:33:14.989793+00:00",
+  "last_run": "2026-10-20T06:33:14.989793+00:00",
   "contagem_por_fonte": {
-    "ingresso": 6,
+    "ingresso": 27,
     "imax_palladium": 6
   },
   "canario_alertado": {
@@ -19,8 +40,8 @@
   },
   "resumo": {
     "desde": "2026-09-16T21:14:49.015389+00:00",
-    "execucoes": 174,
-    "sessoes_novas": 0,
+    "execucoes": 175,
+    "sessoes_novas": 21,
     "erros_por_fonte": {
       "ingresso": 1,
       "imax_palladium": 1
@@ -34,7 +55,14 @@
   "ausentes": {},
   "datas_conhecidas": [
     "15/12/2026",
-    "16/12/2026"
+    "16/12/2026",
+    "17/12/2026",
+    "18/12/2026",
+    "19/12/2026",
+    "20/12/2026",
+    "21/12/2026",
+    "22/12/2026",
+    "23/12/2026"
   ],
   "sessoes_atuais": [
     {
@@ -108,6 +136,258 @@
       ],
       "link": "https://checkout.ingresso.com/?sessionId=86895918&partnership=home",
       "preco": 47.76
+    },
+    {
+      "chave": "87416466",
+      "data": "17/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416466&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416472",
+      "data": "17/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416472&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416439",
+      "data": "17/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416439&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416450",
+      "data": "18/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416450&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416462",
+      "data": "18/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416462&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416443",
+      "data": "18/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416443&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416459",
+      "data": "19/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416459&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416468",
+      "data": "19/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416468&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416455",
+      "data": "19/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416455&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416456",
+      "data": "20/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416456&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416478",
+      "data": "20/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416478&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416437",
+      "data": "20/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416437&partnership=home",
+      "preco": 50.09
+    },
+    {
+      "chave": "87416464",
+      "data": "21/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416464&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416471",
+      "data": "21/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416471&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416473",
+      "data": "21/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416473&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416458",
+      "data": "22/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416458&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416460",
+      "data": "22/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416460&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416457",
+      "data": "22/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416457&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416444",
+      "data": "23/12/2026",
+      "hora": "14:00",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Dublado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416444&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416446",
+      "data": "23/12/2026",
+      "hora": "17:20",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416446&partnership=home",
+      "preco": 40.77
+    },
+    {
+      "chave": "87416449",
+      "data": "23/12/2026",
+      "hora": "20:40",
+      "sala": "Sala 1",
+      "tags": [
+        "IMAX",
+        "Legendado"
+      ],
+      "link": "https://checkout.ingresso.com/?sessionId=87416449&partnership=home",
+      "preco": 40.77
     }
   ],
   "problemas": [
@@ -122,5 +402,6 @@
       "retry_after": null,
       "stack": "Traceback (most recent call last):\n  File \"/home/runner/work/Duna-IMAX-Watcher/Duna-IMAX-Watcher/check_duna_imax.py\", line 327, in buscar_sessoes\n    encontradas = buscar()\n                  ^^^^^^^^\n  File \"/home/runner/work/Duna-IMAX-Watcher/Duna-IMAX-Watcher/check_duna_imax.py\", line 281, in buscar_sessoes_imax_palladium\n    resp.raise_for_status()\n  File \"/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/requests/models.py\", line 1024, in raise_for_status\n    raise HTTPError(http_error_msg, response=self)\nrequests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://imaxpalladium.com.br/filmes/duna-parte-3/\n"
     }
-  ]
+  ],
+  "ultima_sessao_nova": "2026-10-20T06:33:14.989793+00:00"
 }
