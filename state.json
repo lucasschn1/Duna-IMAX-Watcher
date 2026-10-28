@@ -28,8 +28,8 @@
     "87416473",
     "87416478"
   ],
-  "last_heartbeat": "2026-10-27T20:56:29.711238+00:00",
-  "last_run": "2026-10-27T20:56:29.711238+00:00",
+  "last_heartbeat": "2026-10-28T00:27:47.311075+00:00",
+  "last_run": "2026-10-28T00:27:47.311075+00:00",
   "contagem_por_fonte": {
     "ingresso": 27,
     "imax_palladium": 27
@@ -40,7 +40,7 @@
   },
   "resumo": {
     "desde": "2026-09-16T21:14:49.015389+00:00",
-    "execucoes": 218,
+    "execucoes": 219,
     "sessoes_novas": 21,
     "erros_por_fonte": {
       "ingresso": 1,
